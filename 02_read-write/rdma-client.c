@@ -80,19 +80,29 @@ int on_event(struct rdma_cm_event *event)
 {
   int r = 0;
 
-  if (event->event == RDMA_CM_EVENT_ADDR_RESOLVED)
+  switch (event->event)
+  {
+  case RDMA_CM_EVENT_ADDR_RESOLVED:
     r = on_addr_resolved(event->id);
-  else if (event->event == RDMA_CM_EVENT_ROUTE_RESOLVED)
+    break;
+  case RDMA_CM_EVENT_ADDR_ERROR:
+    die("Address resolution (rdma_resolve_addr) failed.");
+    break;
+  case RDMA_CM_EVENT_ROUTE_RESOLVED:
     r = on_route_resolved(event->id);
-  else if (event->event == RDMA_CM_EVENT_ESTABLISHED)
+    break;
+  case RDMA_CM_EVENT_ESTABLISHED:
     r = on_connection(event->id);
-  else if (event->event == RDMA_CM_EVENT_DISCONNECTED)
+    break;
+  case RDMA_CM_EVENT_DISCONNECTED:
     r = on_disconnect(event->id);
-  else {
+    break;
+  default:
     fprintf(stderr, "on_event: %d\n", event->event);
     die("on_event: unknown event.");
+    break;
   }
-
+  
   return r;
 }
 
