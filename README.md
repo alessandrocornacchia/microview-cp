@@ -1,4 +1,4 @@
-the-geek-in-the-corner
+MicroView Control Plane
 ======================
 
-Sample code from thegeekinthecorner.com
+Implementation of SmartNIC to host communication via RDMA for microservices metrics
