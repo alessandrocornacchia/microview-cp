@@ -2,13 +2,16 @@
 
 CFLAGS  := -Wall -g
 LD      := gcc
-LDLIBS  := ${LDLIBS}
+LDLIBS  := ${LDLIBS} -lrt -lpthread
 
-APPS    := ipc
+APPS    := agent pod
 
 all: ${APPS}
 
-ipc: ipc.o
+pod: pod.o
+	${LD} -o $@ $^ ${LDLIBS}
+
+agent: agent.o
 	${LD} -o $@ $^ ${LDLIBS}
 
 clean:
