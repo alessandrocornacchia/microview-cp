@@ -1,67 +1,9 @@
 #include "rdma-common.h"
 
-static const int RDMA_BUFFER_SIZE = 1024;
-
-struct message {
-  enum {
-    MSG_MR,
-    MSG_DONE
-  } type;
-
-  union {
-    struct ibv_mr mr;
-  } data;
-};
-
-struct context {
-  struct ibv_context *ctx;
-  struct ibv_pd *pd;
-  struct ibv_cq *cq;
-  struct ibv_comp_channel *comp_channel;
-
-  pthread_t cq_poller_thread;
-};
-
-struct connection {
-  struct rdma_cm_id *id;
-  struct ibv_qp *qp;
-
-  int connected;
-
-  struct ibv_mr *recv_mr;
-  struct ibv_mr *send_mr;
-  struct ibv_mr *rdma_local_mr;
-  struct ibv_mr *rdma_remote_mr;
-
-  struct ibv_mr peer_mr;
-
-  struct message *recv_msg;
-  struct message *send_msg;
-
-  char *rdma_local_region;
-  char *rdma_remote_region;
-
-  enum {
-    SS_INIT,
-    SS_MR_SENT,
-    SS_RDMA_SENT,
-    SS_DONE_SENT
-  } send_state;
-
-  enum {
-    RS_INIT,
-    RS_MR_RECV,
-    RS_DONE_RECV
-  } recv_state;
-};
-
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
-static char * get_peer_message_region(struct connection *conn);
 static void on_completion(struct ibv_wc *);
 static void * poll_cq(void *);
-static void post_receives(struct connection *conn);
-static void register_memory(struct connection *conn);
 static void send_message(struct connection *conn);
 
 static struct context *s_ctx = NULL;
@@ -73,7 +15,7 @@ void die(const char *reason)
   exit(EXIT_FAILURE);
 }
 
-void build_connection(struct rdma_cm_id *id)
+struct connection* build_connection(struct rdma_cm_id *id)
 {
   struct connection *conn;
   struct ibv_qp_init_attr qp_attr;
@@ -82,6 +24,8 @@ void build_connection(struct rdma_cm_id *id)
   build_qp_attr(&qp_attr);
 
   TEST_NZ(rdma_create_qp(id, s_ctx->pd, &qp_attr));
+
+  void *local_mr = id->context; // we use the context to pass memory region to map
 
   id->context = conn = (struct connection *)malloc(sizeof(struct connection));
 
@@ -93,8 +37,11 @@ void build_connection(struct rdma_cm_id *id)
 
   conn->connected = 0;
 
-  register_memory(conn);
+  register_memory(conn, local_mr);
   post_receives(conn);
+
+  return conn;
+
 }
 
 void build_context(struct ibv_context *verbs)
@@ -106,6 +53,7 @@ void build_context(struct ibv_context *verbs)
     return;
   }
 
+  //if (s_ctx == NULL) 
   s_ctx = (struct context *)malloc(sizeof(struct context));
 
   s_ctx->ctx = verbs;
@@ -153,9 +101,22 @@ void destroy_connection(void *context)
 
   free(conn->send_msg);
   free(conn->recv_msg);
-  free(conn->rdma_local_region);
-  free(conn->rdma_remote_region);
-
+  if (conn->mr_in_heap) {
+    free(conn->rdma_local_region);
+    free(conn->rdma_remote_region);
+  } else {
+    if (s_mode == M_WRITE)
+    {
+      free(conn->rdma_local_region);
+      conn->rdma_remote_region = NULL;
+    }
+    else
+    {
+      free(conn->rdma_local_region);
+      conn->rdma_local_region = NULL;
+    }
+  }
+  
   rdma_destroy_id(conn->id);
 
   free(conn);
@@ -189,7 +150,7 @@ void on_completion(struct ibv_wc *wc)
 
     if (conn->recv_msg->type == MSG_MR) {
       memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
-      post_receives(conn); /* only rearm for MSG_MR */
+      post_receives(conn); /* only rearm for MSG_DONE */
 
       if (conn->send_state == SS_INIT) /* received peer's MR before sending ours, so send ours back */
         send_mr(conn);
@@ -200,6 +161,7 @@ void on_completion(struct ibv_wc *wc)
     printf("send completed successfully.\n");
   }
 
+  // if we sent our MR and received MR from the other party, we can start read/write operations
   if (conn->send_state == SS_MR_SENT && conn->recv_state == RS_MR_RECV) {
     struct ibv_send_wr wr, *bad_wr = NULL;
     struct ibv_sge sge;
@@ -219,8 +181,11 @@ void on_completion(struct ibv_wc *wc)
     wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
     wr.wr.rdma.rkey = conn->peer_mr.rkey;
 
+    /* if s_mode == M_WRITE content of rdma_local_region is written to 
+    rdma_remote_region on the other end. Otherwise, content from the other
+    side rdma_remote_region is fetched into rdma_local_region. */
     sge.addr = (uintptr_t)conn->rdma_local_region;
-    sge.length = RDMA_BUFFER_SIZE;
+    sge.length = RDMA_DEFAULT_BUFFER_SIZE;
     sge.lkey = conn->rdma_local_mr->lkey;
 
     TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
@@ -273,13 +238,26 @@ void post_receives(struct connection *conn)
   TEST_NZ(ibv_post_recv(conn->qp, &wr, &bad_wr));
 }
 
-void register_memory(struct connection *conn)
+void register_memory(struct connection *conn, void* mr)
 {
   conn->send_msg = malloc(sizeof(struct message));
   conn->recv_msg = malloc(sizeof(struct message));
-
-  conn->rdma_local_region = malloc(RDMA_BUFFER_SIZE);
-  conn->rdma_remote_region = malloc(RDMA_BUFFER_SIZE);
+  
+  if (mr != NULL) {
+    conn->mr_in_heap = 0;
+    if (s_mode == M_WRITE) {
+      conn->rdma_local_region = mr;
+      conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+    } else {
+      conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+      conn->rdma_remote_region = mr;
+    }
+  } else {
+    conn->mr_in_heap = 1;
+    conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+    conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+  }
+  
 
   TEST_Z(conn->send_mr = ibv_reg_mr(
     s_ctx->pd, 
@@ -296,13 +274,13 @@ void register_memory(struct connection *conn)
   TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
     s_ctx->pd, 
     conn->rdma_local_region, 
-    RDMA_BUFFER_SIZE, 
+    RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? 0 : IBV_ACCESS_LOCAL_WRITE)));
 
   TEST_Z(conn->rdma_remote_mr = ibv_reg_mr(
     s_ctx->pd, 
     conn->rdma_remote_region, 
-    RDMA_BUFFER_SIZE, 
+    RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
 }
 

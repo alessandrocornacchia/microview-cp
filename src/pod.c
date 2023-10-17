@@ -41,7 +41,11 @@ int produce_metrics(char* shm_name)
         fflush(stdout);
         
         /* write to the shared memory object */
-        sprintf(ptr, "%s", buffer);
+        int rc = sprintf(ptr, "%s", buffer);
+        if (rc < 0) {
+            perror("Error writing to shared memory segment");
+            exit(1);
+        }
 
         i=i+1;
         sleep(1);
@@ -81,11 +85,10 @@ int get_shm_fd(const char* host, char *shm_name) {
         exit(EXIT_FAILURE);
     }
 
-    /* Send pod ID */
-
     /* seed random */
     srand(time(NULL));
 
+    /* Send pod ID */
     int podID = htonl(rand() % 10);
     if (send(clientSocket, &podID, sizeof(podID), 0) == -1) {
         perror("Error sending data");

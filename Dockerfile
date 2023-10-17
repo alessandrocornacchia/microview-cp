@@ -3,4 +3,5 @@ RUN apt-get update && apt-get -y install gcc libc-dev build-essential net-tools 
 COPY . /work/ipc
 WORKDIR /work/ipc
 RUN make
-ENTRYPOINT ["./pod", "host.docker.internal"]
+#ENTRYPOINT ["./pod", "host.docker.internal"]
+# TODO docker internal should be configurable parameter

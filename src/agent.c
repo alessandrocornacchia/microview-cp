@@ -15,11 +15,17 @@
 #include <sys/shm.h>
 #include <sys/mman.h>
 
+#include "rdma-common.h"
+#include "rdma-client.h"
+
 #define Q_NAME    "shm"
 #define MAX_SIZE  1024
 #define MAX_LEN   256
 #define M_EXIT    "done"
-#define SRV_FLAG  "-producer"
+
+static char peer_ip[MAX_LEN] = "192.168.200.2";
+static char peer_port[MAX_LEN];
+static char mode[MAX_LEN];
 
 int consume_metrics(int shm_fd, int podID)
 {
@@ -30,7 +36,7 @@ int consume_metrics(int shm_fd, int podID)
      
     do {
         memcpy(buffer, ptr, MAX_SIZE);
-        printf("POD %d metric: %s\n", podID, buffer);   
+        printf("POD %d metric: %s\n", podID, buffer);
         sleep(5); /* actually will be the agent on the smartNIC to consume then */
     } while (0 != strncmp(buffer, M_EXIT, strlen(M_EXIT)));
 
@@ -38,6 +44,53 @@ int consume_metrics(int shm_fd, int podID)
     shm_unlink(Q_NAME);
     return 0;
 }
+
+
+int start_rdma_session(int shm_fd, int podID) {
+    struct addrinfo *addr;
+    struct rdma_cm_event *event = NULL;
+    struct rdma_cm_id *conn= NULL;
+    struct rdma_event_channel *ec = NULL;
+
+    if (strcmp(mode, "write") == 0){
+        set_mode(M_WRITE);
+    }
+    else if (strcmp(mode, "read") == 0) {
+        set_mode(M_READ);
+    }
+    else {
+        fprintf(stderr, "Invalid mode %s specified\n", mode);
+    }
+
+    /* memory map the shared memory object, and pass it as context to the connection */
+    void *shm_ptr = mmap(0, RDMA_DEFAULT_BUFFER_SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    
+    TEST_NZ(getaddrinfo(peer_ip, peer_port, NULL, &addr));
+
+    TEST_Z(ec = rdma_create_event_channel());
+    TEST_NZ(rdma_create_id(ec, &conn, shm_ptr, RDMA_PS_TCP));
+    TEST_NZ(rdma_resolve_addr(conn, NULL, addr->ai_addr, TIMEOUT_IN_MS));
+
+    freeaddrinfo(addr);
+
+    while (rdma_get_cm_event(ec, &event) == 0)
+    {
+        struct rdma_cm_event event_copy;
+
+        memcpy(&event_copy, event, sizeof(*event));
+        rdma_ack_cm_event(event);
+
+        if (on_event(&event_copy))
+        {
+            break;
+        }
+    }
+
+    rdma_destroy_event_channel(ec);
+
+    return 0;
+}
+
 
 // Function to handle client requests
 void *handleNewPod(void *clientSocket) {
@@ -65,8 +118,7 @@ void *handleNewPod(void *clientSocket) {
     printf("MicroView agent created memory region with ID: %d, %s\n", shm_fd, shm_name);
     /* configure the size of the shared memory object */
     ftruncate(shm_fd, MAX_SIZE);
-    //int shm_fdnet = htonl(shm_fd);
-    // Write the number to the opened socket (we should just send back the name)
+    // Write the name back to the opened socket 
     write(clientSock, &shm_name, sizeof(shm_name));
 
     // Close the tcp socket
@@ -74,7 +126,11 @@ void *handleNewPod(void *clientSocket) {
     free(clientSocket);
 
     // start reading metrics (this will be done by the agent on the smartNIC)
-    consume_metrics(shm_fd, podID);
+    //consume_metrics(shm_fd, podID);
+    sleep(3); // TODO remove
+
+    printf("Starting RDMA session\n");
+    start_rdma_session(shm_fd, podID);
 
     pthread_exit(NULL);
 }
@@ -156,5 +212,23 @@ int run() {
 
 int main(int argc, char *argv[])
 {
+    // parse arguments and set corresponding global variables
+    if (argc != 4) {
+        usage(argv[0]);
+        exit(EXIT_FAILURE);
+    }
+    
+    sprintf(peer_ip, "%s", argv[1]);
+    sprintf(peer_port, "%s", argv[2]);
+    sprintf(mode, "%s", argv[3]);
+    
+    printf("Agent connects to peer %s on port %s, mode = %s\n", peer_ip, peer_port, mode);
+    
     run();
+}
+
+void usage(const char *argv0)
+{
+  fprintf(stderr, "usage: %s <DPU-address> <DPU-port> <mode>\n  mode = \"read\", \"write\"\n", argv0);
+  exit(1);
 }
