@@ -6,14 +6,14 @@ static void on_completion(struct ibv_wc *);
 static void * poll_cq(void *);
 static void send_message(struct connection *conn);
 
-static struct context *s_ctx = NULL;
+static struct context *s_ctx[RDMA_MAX_CONNECTIONS];
 static enum mode s_mode = M_WRITE;
 static enum role role;
 static int num_wr = 0;
 
 int block_size;
 int num_mr;
-int num_connections;
+int num_connections = 0;
 
 void die(const char *reason)
 {
@@ -24,13 +24,17 @@ void die(const char *reason)
 
 struct connection* build_connection(struct rdma_cm_id *id)
 {
+  
+  if (num_connections >= RDMA_MAX_CONNECTIONS)
+    die("Connection limit reached\n");
+
   struct connection *conn;
   struct ibv_qp_init_attr qp_attr;
 
   build_context(id->verbs);
   build_qp_attr(&qp_attr);
 
-  TEST_NZ(rdma_create_qp(id, s_ctx->pd, &qp_attr));
+  TEST_NZ(rdma_create_qp(id, s_ctx[num_connections]->pd, &qp_attr));
 
   void *local_mr = id->context; // we use the context to pass memory region to map
 
@@ -47,30 +51,36 @@ struct connection* build_connection(struct rdma_cm_id *id)
   register_memory(conn, local_mr);
   post_receives(conn);
 
+  num_connections++;
+
   return conn;
 
 }
 
 void build_context(struct ibv_context *verbs)
 {
-  if (s_ctx) {
-    if (s_ctx->ctx != verbs)
-      die("cannot handle events in more than one context.");
+  if (s_ctx[num_connections]) {
+    if (s_ctx[num_connections]->ctx != verbs)
+      die("context already in use!");
 
+    // TODO understand the logic here
+    printf("[WARNING]: context already in use\n");
     return;
   }
 
-  //if (s_ctx == NULL) 
-  s_ctx = (struct context *)malloc(sizeof(struct context));
+  //if (s_ctx[num_connections] == NULL) 
+  s_ctx[num_connections] = (struct context *)malloc(sizeof(struct context));
 
-  s_ctx->ctx = verbs;
+  s_ctx[num_connections]->ctx = verbs;
 
-  TEST_Z(s_ctx->pd = ibv_alloc_pd(s_ctx->ctx));
-  TEST_Z(s_ctx->comp_channel = ibv_create_comp_channel(s_ctx->ctx));
-  TEST_Z(s_ctx->cq = ibv_create_cq(s_ctx->ctx, 10, NULL, s_ctx->comp_channel, 0)); /* cqe=10 is arbitrary */
-  TEST_NZ(ibv_req_notify_cq(s_ctx->cq, 0));
+  TEST_Z(s_ctx[num_connections]->pd = ibv_alloc_pd(s_ctx[num_connections]->ctx));
+  TEST_Z(s_ctx[num_connections]->comp_channel = ibv_create_comp_channel(s_ctx[num_connections]->ctx));
+  TEST_Z(s_ctx[num_connections]->cq = ibv_create_cq(s_ctx[num_connections]->ctx, 10, NULL, s_ctx[num_connections]->comp_channel, 0)); /* cqe=10 is arbitrary */
+  TEST_NZ(ibv_req_notify_cq(s_ctx[num_connections]->cq, 0));
 
-  TEST_NZ(pthread_create(&s_ctx->cq_poller_thread, NULL, poll_cq, NULL));
+  int *i = malloc(sizeof(int)); // thread identifier
+  *i = num_connections;
+  TEST_NZ(pthread_create(&s_ctx[num_connections]->cq_poller_thread, NULL, poll_cq, (void*)i));
 }
 
 void build_params(struct rdma_conn_param *params)
@@ -85,8 +95,8 @@ void build_qp_attr(struct ibv_qp_init_attr *qp_attr)
 {
   memset(qp_attr, 0, sizeof(*qp_attr));
 
-  qp_attr->send_cq = s_ctx->cq;
-  qp_attr->recv_cq = s_ctx->cq;
+  qp_attr->send_cq = s_ctx[num_connections]->cq;
+  qp_attr->recv_cq = s_ctx[num_connections]->cq;
   qp_attr->qp_type = IBV_QPT_RC;
 
   qp_attr->cap.max_send_wr = 8000;
@@ -208,6 +218,7 @@ void on_completion(struct ibv_wc *wc)
     }
 
     // if we received MR from the other party, we can start read/write operations
+    // TODO should read from multiple MRs here
     if (conn->recv_state == RS_MR_RECV)
     {
       struct ibv_send_wr wr, *bad_wr = NULL;
@@ -231,15 +242,7 @@ void on_completion(struct ibv_wc *wc)
       sge.lkey = conn->rdma_local_mr->lkey;
 
       sleep(1);
-      if (num_wr < 1) {
-        for (int i=0; i < 2; i++)
-        {
-          printf("posted new read WR %d\n", num_wr);
-          num_wr = num_wr + 1;
-          TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
-        }
-      }
-      
+      TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
       
       
       // conn->send_msg->type = MSG_DONE;
@@ -258,9 +261,11 @@ void * poll_cq(void *ctx)
 {
   struct ibv_cq *cq;
   struct ibv_wc wc;
-
+  int i = *((int*)ctx);
+  printf("Polling on connection %d\n", i);
+  
   while (1) {
-    TEST_NZ(ibv_get_cq_event(s_ctx->comp_channel, &cq, &ctx));
+    TEST_NZ(ibv_get_cq_event(s_ctx[i]->comp_channel, &cq, &ctx));
     ibv_ack_cq_events(cq, 1);
     TEST_NZ(ibv_req_notify_cq(cq, 0));
 
@@ -324,25 +329,25 @@ void register_memory(struct connection *conn, void* mr)
   
 
   TEST_Z(conn->send_mr = ibv_reg_mr(
-    s_ctx->pd, 
+    s_ctx[num_connections]->pd, 
     conn->send_msg, 
     sizeof(struct message), 
     0));
 
   TEST_Z(conn->recv_mr = ibv_reg_mr(
-    s_ctx->pd, 
+    s_ctx[num_connections]->pd, 
     conn->recv_msg, 
     sizeof(struct message), 
     IBV_ACCESS_LOCAL_WRITE));
 
   TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
-    s_ctx->pd, 
+    s_ctx[num_connections]->pd, 
     conn->rdma_local_region, 
     RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? 0 : IBV_ACCESS_LOCAL_WRITE)));
 
   TEST_Z(conn->rdma_remote_mr = ibv_reg_mr(
-    s_ctx->pd, 
+    s_ctx[num_connections]->pd, 
     conn->rdma_remote_region, 
     RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
@@ -353,7 +358,7 @@ void register_memory(struct connection *conn, void* mr)
   for (int i=0; i < num_mr; i++)
   {
     TEST_Z(conn->rdma_remote_mr_vec[i] = ibv_reg_mr(
-    s_ctx->pd, 
+    s_ctx[num_connections]->pd, 
     conn->rdma_remote_region_vec[i], 
     block_size, 
     ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));

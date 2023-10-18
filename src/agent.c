@@ -25,7 +25,9 @@
 
 static char peer_ip[MAX_LEN] = "192.168.200.2";
 static char peer_port[MAX_LEN];
+static int num_pods = 0;
 //static char mode[MAX_LEN];
+
 
 extern int block_size;
 extern int num_mr;
@@ -74,7 +76,7 @@ int start_rdma_session(int shm_fd, int podID) {
     TEST_NZ(getaddrinfo(peer_ip, peer_port, NULL, &addr));
 
     TEST_Z(ec = rdma_create_event_channel());
-    TEST_NZ(rdma_create_id(ec, &conn, shm_ptr, RDMA_PS_TCP));
+    TEST_NZ(rdma_create_id(ec, &conn, shm_ptr, RDMA_PS_TCP));   // we pass here the pointer to shared memory
     TEST_NZ(rdma_resolve_addr(conn, NULL, addr->ai_addr, TIMEOUT_IN_MS));
 
     freeaddrinfo(addr);
@@ -115,13 +117,13 @@ void *handleNewPod(void *clientSocket) {
     /* create the shared memory object */
     char shm_name[MAX_LEN];
     memset(shm_name, 0, MAX_LEN);
-    sprintf(shm_name, "%s-%d", Q_NAME, podID);
+    sprintf(shm_name, "%s-%d", Q_NAME, num_pods++);
     shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
     if (shm_fd == -1) {
         perror("Error creating shared memory object");
         exit(EXIT_FAILURE);
     }
-    printf("MicroView agent created memory region with ID: %d, %s\n", shm_fd, shm_name);
+    printf("MicroView agent created memory region with file descriptor: %d, %s\n", shm_fd, shm_name);
     /* configure the size of the shared memory object */
     ftruncate(shm_fd, MAX_SIZE);
     // Write the name back to the opened socket 
