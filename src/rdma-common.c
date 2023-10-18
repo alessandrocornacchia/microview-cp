@@ -2,7 +2,7 @@
 
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
-static void on_completion(struct ibv_wc *);
+static void on_completion(struct ibv_wc *, int id);
 static void * poll_cq(void *);
 static void send_message(struct connection *conn);
 
@@ -155,7 +155,7 @@ char * get_peer_message_region(struct connection *conn)
     return conn->rdma_local_region;
 }
 
-void on_completion(struct ibv_wc *wc)
+void on_completion(struct ibv_wc *wc, int i)
 {
 
   struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
@@ -214,7 +214,7 @@ void on_completion(struct ibv_wc *wc)
     else
     {
       conn->send_state = SS_RDMA_SENT;
-      printf("READ remote buffer: %s\n", get_peer_message_region(conn));
+      printf("READ remote buffer pod-%d: %s\n", i, get_peer_message_region(conn));
     }
 
     // if we received MR from the other party, we can start read/write operations
@@ -241,7 +241,7 @@ void on_completion(struct ibv_wc *wc)
       sge.length = RDMA_DEFAULT_BUFFER_SIZE;
       sge.lkey = conn->rdma_local_mr->lkey;
 
-      sleep(1);
+      sleep(5);
       TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
       
       
@@ -270,7 +270,7 @@ void * poll_cq(void *ctx)
     TEST_NZ(ibv_req_notify_cq(cq, 0));
 
     while (ibv_poll_cq(cq, 1, &wc))
-      on_completion(&wc);
+      on_completion(&wc, i);
   }
 
   return NULL;
