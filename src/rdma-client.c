@@ -1,35 +1,35 @@
-#include <rdma-client.h>
+#include "rdma-client.h"
 
-void on_completion2(struct ibv_wc *wc)
-{
-  struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
+// void on_completion_client(struct ibv_wc *wc)
+// {
+//   struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
 
-  if (wc->status != IBV_WC_SUCCESS)
-    die("on_completion: status is not IBV_WC_SUCCESS.");
+//   if (wc->status != IBV_WC_SUCCESS)
+//     die("on_completion: status is not IBV_WC_SUCCESS.");
 
-  if (wc->opcode & IBV_WC_RECV) {
-    // if client receives something is either DONE or sketch classification
-    // as we are not interested in receiving the MR from the server / NIC
-    conn->recv_state = RS_DONE_RECV; 
+//   if (wc->opcode & IBV_WC_RECV) {
+//     // if client receives something is either DONE or sketch classification
+//     // as we are not interested in receiving the MR from the server / NIC
+//     conn->recv_state = RS_DONE_RECV; 
 
-    if (conn->recv_msg->type == MSG_DONE) {
-      //memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
-      // TODO
-      printf("Received control information from server\n");
-      post_receives(conn); /* only rearm for MSG_DONE */
-    }
+//     if (conn->recv_msg->type == MSG_DONE) {
+//       //memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
+//       // TODO
+//       printf("Received control information from server\n");
+//       post_receives(conn); /* only rearm for MSG_DONE */
+//     }
 
-  } else {
-    conn->send_state = SS_MR_SENT;
-    printf("send MR completed successfully.\n");
-  }
+//   } else {
+//     conn->send_state = SS_MR_SENT;
+//     printf("send MR completed successfully.\n");
+//   }
 
-  // TODO connection tear-down performed asynchronously when pod is dead (implement watch thread)
-  if (conn->send_state == SS_DONE_SENT && conn->recv_state == RS_DONE_RECV) {
-    printf("remote buffer: %s\n", get_peer_message_region(conn));
-    rdma_disconnect(conn->id);
-  }
-}
+//   // TODO connection tear-down performed asynchronously when pod is dead (implement watch thread)
+//   if (conn->send_state == SS_DONE_SENT && conn->recv_state == RS_DONE_RECV) {
+//     printf("remote buffer: %s\n", get_peer_message_region(conn));
+//     rdma_disconnect(conn->id);
+//   }
+// }
 
 int on_addr_resolved(struct rdma_cm_id *id)
 {

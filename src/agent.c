@@ -25,7 +25,7 @@
 
 static char peer_ip[MAX_LEN] = "192.168.200.2";
 static char peer_port[MAX_LEN];
-static char mode[MAX_LEN];
+//static char mode[MAX_LEN];
 
 int consume_metrics(int shm_fd, int podID)
 {
@@ -52,15 +52,18 @@ int start_rdma_session(int shm_fd, int podID) {
     struct rdma_cm_id *conn= NULL;
     struct rdma_event_channel *ec = NULL;
 
-    if (strcmp(mode, "write") == 0){
-        set_mode(M_WRITE);
-    }
-    else if (strcmp(mode, "read") == 0) {
-        set_mode(M_READ);
-    }
-    else {
-        fprintf(stderr, "Invalid mode %s specified\n", mode);
-    }
+    // if (strcmp(mode, "write") == 0){
+    //     set_mode(M_WRITE);
+    // }
+    // else if (strcmp(mode, "read") == 0) {
+    //     set_mode(M_READ);
+    // }
+    // else {
+    //     fprintf(stderr, "Invalid mode %s specified\n", mode);
+    // }
+
+    set_mode(M_READ);
+    set_role(R_CLIENT);
 
     /* memory map the shared memory object, and pass it as context to the connection */
     void *shm_ptr = mmap(0, RDMA_DEFAULT_BUFFER_SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -127,7 +130,6 @@ void *handleNewPod(void *clientSocket) {
 
     // start reading metrics (this will be done by the agent on the smartNIC)
     //consume_metrics(shm_fd, podID);
-    sleep(3); // TODO remove
 
     printf("Starting RDMA session\n");
     start_rdma_session(shm_fd, podID);
@@ -213,22 +215,21 @@ int run() {
 int main(int argc, char *argv[])
 {
     // parse arguments and set corresponding global variables
-    if (argc != 4) {
+    if (argc != 3) {
         usage(argv[0]);
         exit(EXIT_FAILURE);
     }
     
     sprintf(peer_ip, "%s", argv[1]);
     sprintf(peer_port, "%s", argv[2]);
-    sprintf(mode, "%s", argv[3]);
     
-    printf("Agent connects to peer %s on port %s, mode = %s\n", peer_ip, peer_port, mode);
+    printf("Agent connects to peer %s on port %s, mode = %s\n", peer_ip, peer_port, "read");
     
     run();
 }
 
 void usage(const char *argv0)
 {
-  fprintf(stderr, "usage: %s <DPU-address> <DPU-port> <mode>\n  mode = \"read\", \"write\"\n", argv0);
+  fprintf(stderr, "usage: %s <DPU-address> <DPU-port>", argv0);
   exit(1);
 }

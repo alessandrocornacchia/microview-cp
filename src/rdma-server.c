@@ -17,15 +17,18 @@ int main(int argc, char **argv)
   if (argc != 2)
     usage(argv[0]);
 
-  if (strcmp(argv[1], "write") == 0)
+  /*if (strcmp(argv[1], "write") == 0)
     set_mode(M_WRITE);
   else if (strcmp(argv[1], "read") == 0)
-    set_mode(M_READ);
-  else
-    usage(argv[0]);
+    set_mode(M_READ);*/
+
+  set_mode(M_READ); // in this case we always read
+  set_role(R_SERVER);
 
   memset(&addr, 0, sizeof(addr));
   addr.sin6_family = AF_INET6;
+  
+  addr.sin6_port = htons((uint16_t)strtol(argv[1], NULL, 10)); // TODO should implement check
 
   TEST_Z(ec = rdma_create_event_channel());
   TEST_NZ(rdma_create_id(ec, &listener, NULL, RDMA_PS_TCP));
@@ -51,6 +54,7 @@ int main(int argc, char **argv)
 
   return 0;
 }
+
 
 int on_connect_request(struct rdma_cm_id *id)
 {

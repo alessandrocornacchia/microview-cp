@@ -8,9 +8,12 @@ static void send_message(struct connection *conn);
 
 static struct context *s_ctx = NULL;
 static enum mode s_mode = M_WRITE;
+static enum role role;
+static int num_wr = 0;
 
 void die(const char *reason)
 {
+  perror(reason);
   fprintf(stderr, "%s\n", reason);
   exit(EXIT_FAILURE);
 }
@@ -82,7 +85,7 @@ void build_qp_attr(struct ibv_qp_init_attr *qp_attr)
   qp_attr->recv_cq = s_ctx->cq;
   qp_attr->qp_type = IBV_QPT_RC;
 
-  qp_attr->cap.max_send_wr = 10;
+  qp_attr->cap.max_send_wr = 8000;
   qp_attr->cap.max_recv_wr = 10;
   qp_attr->cap.max_send_sge = 1;
   qp_attr->cap.max_recv_sge = 1;
@@ -140,63 +143,106 @@ char * get_peer_message_region(struct connection *conn)
 
 void on_completion(struct ibv_wc *wc)
 {
+
   struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
 
   if (wc->status != IBV_WC_SUCCESS)
     die("on_completion: status is not IBV_WC_SUCCESS.");
 
-  if (wc->opcode & IBV_WC_RECV) {
-    conn->recv_state++;
-
-    if (conn->recv_msg->type == MSG_MR) {
-      memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
+  if (role == R_CLIENT)
+  {
+    if (wc->opcode & IBV_WC_RECV)
+    {
+      // if client receives something is either DONE or sketch classification
+      // as we are not interested in receiving the MR from the server / NIC
+      
+      if (conn->recv_msg->type != MSG_DONE)
+      {
+        fprintf(stderr, "Received unexpected message type %d\n", conn->recv_msg->type);
+        exit(1);
+      }
+      
+      conn->recv_state = RS_DONE_RECV;
+      // memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
+      //  TODO manage output
+      printf("Received control information from server\n");
       post_receives(conn); /* only rearm for MSG_DONE */
-
-      if (conn->send_state == SS_INIT) /* received peer's MR before sending ours, so send ours back */
-        send_mr(conn);
+      
+    }
+    else
+    {
+      conn->send_state = SS_MR_SENT;
+      printf("send MR completed successfully.\n");
     }
 
-  } else {
-    conn->send_state++;
-    printf("send completed successfully.\n");
+    // TODO connection tear-down performed asynchronously when pod is dead (implement watch thread)
+    if (conn->send_state == SS_DONE_SENT && conn->recv_state == RS_DONE_RECV)
+    {
+      printf("remote buffer: %s\n", get_peer_message_region(conn));
+      rdma_disconnect(conn->id);
+    }
+
   }
+  else if (role == R_SERVER)
+  {
 
-  // if we sent our MR and received MR from the other party, we can start read/write operations
-  if (conn->send_state == SS_MR_SENT && conn->recv_state == RS_MR_RECV) {
-    struct ibv_send_wr wr, *bad_wr = NULL;
-    struct ibv_sge sge;
+    if (wc->opcode & IBV_WC_RECV)
+    {
+      conn->recv_state++;
 
-    if (s_mode == M_WRITE)
-      printf("received MSG_MR. writing message to remote memory...\n");
+      if (conn->recv_msg->type == MSG_MR)
+      {
+        memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
+        post_receives(conn); 
+        /* only rearm for other control messages from agent on host, e.g., MSG_DONE to disconnect */
+      }
+    }
     else
-      printf("received MSG_MR. reading message from remote memory...\n");
+    {
+      conn->send_state = SS_RDMA_SENT;
+      printf("READ remote buffer: %s\n", get_peer_message_region(conn));
+    }
 
-    memset(&wr, 0, sizeof(wr));
+    // if we received MR from the other party, we can start read/write operations
+    if (conn->recv_state == RS_MR_RECV)
+    {
+      struct ibv_send_wr wr, *bad_wr = NULL;
+      struct ibv_sge sge;
 
-    wr.wr_id = (uintptr_t)conn;
-    wr.opcode = (s_mode == M_WRITE) ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
-    wr.sg_list = &sge;
-    wr.num_sge = 1;
-    wr.send_flags = IBV_SEND_SIGNALED;
-    wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
-    wr.wr.rdma.rkey = conn->peer_mr.rkey;
+      memset(&wr, 0, sizeof(wr));
 
-    /* if s_mode == M_WRITE content of rdma_local_region is written to 
-    rdma_remote_region on the other end. Otherwise, content from the other
-    side rdma_remote_region is fetched into rdma_local_region. */
-    sge.addr = (uintptr_t)conn->rdma_local_region;
-    sge.length = RDMA_DEFAULT_BUFFER_SIZE;
-    sge.lkey = conn->rdma_local_mr->lkey;
+      wr.wr_id = (uintptr_t)conn; // something that we specify and use as ID
+      wr.opcode = (s_mode == M_WRITE) ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
+      wr.sg_list = &sge;
+      wr.num_sge = 1;
+      wr.send_flags = IBV_SEND_SIGNALED;
+      wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
+      wr.wr.rdma.rkey = conn->peer_mr.rkey;
 
-    TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
+      /* if s_mode == M_WRITE content of rdma_local_region is written to
+      rdma_remote_region on the other end. Otherwise, content from the other
+      side rdma_remote_region is fetched into rdma_local_region. */
+      sge.addr = (uintptr_t)conn->rdma_local_region;
+      sge.length = RDMA_DEFAULT_BUFFER_SIZE;
+      sge.lkey = conn->rdma_local_mr->lkey;
 
-    conn->send_msg->type = MSG_DONE;
-    send_message(conn);
-
-  } else if (conn->send_state == SS_DONE_SENT && conn->recv_state == RS_DONE_RECV) {
-    printf("remote buffer: %s\n", get_peer_message_region(conn));
-    rdma_disconnect(conn->id);
+      sleep(1);
+      if (num_wr < 1) {
+        for (int i=0; i < 2; i++)
+        {
+          printf("posted new read WR %d\n", num_wr);
+          num_wr = num_wr + 1;
+          TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
+        }
+      }
+      
+      
+      
+      // conn->send_msg->type = MSG_DONE;
+      // send_message(conn);
+    }
   }
+  
 }
 
 void on_connect(void *context)
@@ -250,12 +296,14 @@ void register_memory(struct connection *conn, void* mr)
       conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
     } else {
       conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+//      conn->rdma_remote_region_2 = malloc(RDMA_DEFAULT_BUFFER_SIZE);
       conn->rdma_remote_region = mr;
     }
   } else {
     conn->mr_in_heap = 1;
     conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
     conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+//    conn->rdma_remote_region_2 = malloc(RDMA_DEFAULT_BUFFER_SIZE);
   }
   
 
@@ -282,6 +330,12 @@ void register_memory(struct connection *conn, void* mr)
     conn->rdma_remote_region, 
     RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
+
+  /*TEST_Z(conn->rdma_remote_mr_2 = ibv_reg_mr(
+    s_ctx->pd, 
+    conn->rdma_remote_region_2, 
+    RDMA_DEFAULT_BUFFER_SIZE, 
+    ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));*/
 }
 
 void send_message(struct connection *conn)
@@ -319,4 +373,9 @@ void send_mr(void *context)
 void set_mode(enum mode m)
 {
   s_mode = m;
+}
+
+void set_role(enum role r)
+{
+  role = r;
 }
