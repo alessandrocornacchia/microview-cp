@@ -236,6 +236,6 @@ int main(int argc, char *argv[])
 
 void usage(const char *argv0)
 {
-  fprintf(stderr, "usage: %s <DPU-address> <DPU-port>", argv0);
+  fprintf(stderr, "usage: %s <DPU-address> <DPU-port> <block size> <MR per pod>", argv0);
   exit(1);
 }

@@ -12,7 +12,7 @@
 #define TEST_Z(x)  do { if (!(x)) die("error: " #x " failed (returned zero/null)."); } while (0)
 
 #define RDMA_DEFAULT_BUFFER_SIZE 1024
-#define RDMA_MAX_CONTEXTS 1024
+#define RDMA_MAX_CONNECTIONS 1024
 
 enum mode {
   M_WRITE,

@@ -13,6 +13,7 @@ static int num_wr = 0;
 
 int block_size;
 int num_mr;
+int num_connections;
 
 void die(const char *reason)
 {
@@ -311,12 +312,14 @@ void register_memory(struct connection *conn, void* mr)
   }
 
   // in any case we allocate this memory
+  printf("Allocating %d memory regions of size %dB\n", num_mr, block_size);
   conn->rdma_remote_region_vec = malloc(num_mr * sizeof(char*));
   for (int i=0; i < num_mr; i++)
   {
-    conn->rdma_remote_region_vec[i] = malloc(RDMA_DEFAULT_BUFFER_SIZE);
-    memset(conn->rdma_remote_region_vec[i], 0, RDMA_DEFAULT_BUFFER_SIZE);
+    conn->rdma_remote_region_vec[i] = malloc(block_size);
+    memset(conn->rdma_remote_region_vec[i], 0, block_size);
     sprintf(conn->rdma_remote_region_vec[i], "message from active/client side with pid %d", getpid());
+    
   }
   
 
@@ -346,13 +349,13 @@ void register_memory(struct connection *conn, void* mr)
 
 
   // memory map different blocks
+  conn->rdma_remote_mr_vec = malloc(num_mr * sizeof(struct ibv_mr*));
   for (int i=0; i < num_mr; i++)
   {
-  
     TEST_Z(conn->rdma_remote_mr_vec[i] = ibv_reg_mr(
     s_ctx->pd, 
     conn->rdma_remote_region_vec[i], 
-    RDMA_DEFAULT_BUFFER_SIZE, 
+    block_size, 
     ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
 
   }
