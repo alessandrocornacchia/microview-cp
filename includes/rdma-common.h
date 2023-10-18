@@ -47,7 +47,7 @@ struct connection {
   struct ibv_mr *rdma_local_mr;
   struct ibv_mr *rdma_remote_mr;
 
-  struct ibv_mr *rdma_remote_mr_2;
+  struct ibv_mr **rdma_remote_mr_vec;
 
   struct ibv_mr peer_mr;
 
@@ -56,7 +56,7 @@ struct connection {
 
   char *rdma_local_region;
   char *rdma_remote_region;
-  char *rdma_remote_region_2;
+  char **rdma_remote_region_vec;
 
   int mr_in_heap;
 

@@ -27,6 +27,9 @@ static char peer_ip[MAX_LEN] = "192.168.200.2";
 static char peer_port[MAX_LEN];
 //static char mode[MAX_LEN];
 
+extern int block_size;
+extern int num_mr;
+
 int consume_metrics(int shm_fd, int podID)
 {
     char buffer[MAX_SIZE];
@@ -215,7 +218,7 @@ int run() {
 int main(int argc, char *argv[])
 {
     // parse arguments and set corresponding global variables
-    if (argc != 3) {
+    if (argc != 5) {
         usage(argv[0]);
         exit(EXIT_FAILURE);
     }
@@ -223,6 +226,9 @@ int main(int argc, char *argv[])
     sprintf(peer_ip, "%s", argv[1]);
     sprintf(peer_port, "%s", argv[2]);
     
+    block_size = atoi(argv[3]);
+    num_mr = atoi(argv[4]);
+
     printf("Agent connects to peer %s on port %s, mode = %s\n", peer_ip, peer_port, "read");
     
     run();

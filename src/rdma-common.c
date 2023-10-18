@@ -11,6 +11,9 @@ static enum mode s_mode = M_WRITE;
 static enum role role;
 static int num_wr = 0;
 
+int block_size;
+int num_mr;
+
 void die(const char *reason)
 {
   perror(reason);
@@ -290,7 +293,7 @@ void register_memory(struct connection *conn, void* mr)
   conn->recv_msg = malloc(sizeof(struct message));
   
   if (mr != NULL) {
-    conn->mr_in_heap = 0;
+    conn->mr_in_heap = 0;   // memory not allocated using malloc
     if (s_mode == M_WRITE) {
       conn->rdma_local_region = mr;
       conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
@@ -298,12 +301,22 @@ void register_memory(struct connection *conn, void* mr)
       conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
 //      conn->rdma_remote_region_2 = malloc(RDMA_DEFAULT_BUFFER_SIZE);
       conn->rdma_remote_region = mr;
+      
     }
   } else {
+    // TODO server should not even allocate this memory as it is useless
     conn->mr_in_heap = 1;
     conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
-    conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
-//    conn->rdma_remote_region_2 = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+    conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);  
+  }
+
+  // in any case we allocate this memory
+  conn->rdma_remote_region_vec = malloc(num_mr * sizeof(char*));
+  for (int i=0; i < num_mr; i++)
+  {
+    conn->rdma_remote_region_vec[i] = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+    memset(conn->rdma_remote_region_vec[i], 0, RDMA_DEFAULT_BUFFER_SIZE);
+    sprintf(conn->rdma_remote_region_vec[i], "message from active/client side with pid %d", getpid());
   }
   
 
@@ -331,11 +344,19 @@ void register_memory(struct connection *conn, void* mr)
     RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
 
-  /*TEST_Z(conn->rdma_remote_mr_2 = ibv_reg_mr(
+
+  // memory map different blocks
+  for (int i=0; i < num_mr; i++)
+  {
+  
+    TEST_Z(conn->rdma_remote_mr_vec[i] = ibv_reg_mr(
     s_ctx->pd, 
-    conn->rdma_remote_region_2, 
+    conn->rdma_remote_region_vec[i], 
     RDMA_DEFAULT_BUFFER_SIZE, 
-    ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));*/
+    ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
+
+  }
+  
 }
 
 void send_message(struct connection *conn)
