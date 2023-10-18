@@ -34,6 +34,6 @@ On the other hand, MicroView agent:
 DOUBTS:
  - Does RDMA work completion for READ means that READ has been issued or that we alredy have data available? 
  - are RDMA read processed in order, ok, means next read is sent when previous read has rx data or pipelined? 
- - throughput degradation is function of number of connections (reading paper), what if same connections and scattered memory regions?
+ - throughput degradation is function of number of connections (reading paper), what if same connections + scattered memory regions? Expect same performance as single connection.
  - investigate what happens when do not create a new context but reuse the same over all connections... you basicaly map the same completion queue/WQ to 
   different connections so they both rx read request and respond ??? is message sent to queue pair or to all queue pairs on the destination host??

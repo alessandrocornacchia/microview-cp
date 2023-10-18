@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <rdma/rdma_cma.h>
+#include <sys/time.h>
 
 #define TEST_NZ(x) do { if ( (x)) die("error: " #x " failed (returned non-zero)." ); } while (0)
 #define TEST_Z(x)  do { if (!(x)) die("error: " #x " failed (returned zero/null)."); } while (0)
@@ -74,6 +75,10 @@ struct connection {
   } recv_state;
 };
 
+struct control_plane {
+  int shm_ptr;
+  int pod_id;
+};
 
 struct context {
   struct ibv_context *ctx;

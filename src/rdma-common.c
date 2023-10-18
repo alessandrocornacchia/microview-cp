@@ -2,7 +2,7 @@
 
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
-static void on_completion(struct ibv_wc *, int id);
+static void on_completion(struct ibv_wc *, int id, struct timespec *start, double *sum);
 static void * poll_cq(void *);
 static void send_message(struct connection *conn);
 
@@ -36,7 +36,7 @@ struct connection* build_connection(struct rdma_cm_id *id)
 
   TEST_NZ(rdma_create_qp(id, s_ctx[num_connections]->pd, &qp_attr));
 
-  void *local_mr = id->context; // we use the context to pass memory region to map
+  void *local_mr = id->context; // we use the context to pass memory region to map -- could pass podID from here
 
   id->context = conn = (struct connection *)malloc(sizeof(struct connection));
 
@@ -51,7 +51,7 @@ struct connection* build_connection(struct rdma_cm_id *id)
   register_memory(conn, local_mr);
   post_receives(conn);
 
-  num_connections++;
+  num_connections++;  // TODO investigate why shit happens if we comment this
 
   return conn;
 
@@ -155,7 +155,7 @@ char * get_peer_message_region(struct connection *conn)
     return conn->rdma_local_region;
 }
 
-void on_completion(struct ibv_wc *wc, int i)
+void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum)
 {
 
   struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
@@ -209,12 +209,21 @@ void on_completion(struct ibv_wc *wc, int i)
         memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
         post_receives(conn); 
         /* only rearm for other control messages from agent on host, e.g., MSG_DONE to disconnect */
+        printf("Wait for initialization....\n");
+        //sleep(10); // TODO remove, just gives time to all pods to be generated
       }
     }
     else
     {
+      struct timespec end;
+      clock_gettime(CLOCK_REALTIME, &end); // get initial time-stamp
+      double t_ns = (double)(end.tv_sec - start->tv_sec) * 1.0e9 +
+              (double)(end.tv_nsec - start->tv_nsec);
+      
+      *sum += t_ns;        
       conn->send_state = SS_RDMA_SENT;
-      printf("READ remote buffer pod-%d: %s\n", i, get_peer_message_region(conn));
+      printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", i, get_peer_message_region(conn), t_ns);
+      //printf("%f\n", (*sum)/1000);
     }
 
     // if we received MR from the other party, we can start read/write operations
@@ -241,10 +250,16 @@ void on_completion(struct ibv_wc *wc, int i)
       sge.length = RDMA_DEFAULT_BUFFER_SIZE;
       sge.lkey = conn->rdma_local_mr->lkey;
 
-      sleep(5);
+      
+      sleep(2);
+      //sleep(5);
+      // stop-and-wait: send new read after receiving the previous one
+      clock_gettime(CLOCK_REALTIME, start); // get initial time-stamp
+      //if (num_wr < 1000) {
+      
       TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
-      
-      
+        //num_wr++;
+      //}
       // conn->send_msg->type = MSG_DONE;
       // send_message(conn);
     }
@@ -264,13 +279,16 @@ void * poll_cq(void *ctx)
   int i = *((int*)ctx);
   printf("Polling on connection %d\n", i);
   
+  struct timespec start;
+  double sum = 0;
+    
   while (1) {
     TEST_NZ(ibv_get_cq_event(s_ctx[i]->comp_channel, &cq, &ctx));
     ibv_ack_cq_events(cq, 1);
     TEST_NZ(ibv_req_notify_cq(cq, 0));
 
     while (ibv_poll_cq(cq, 1, &wc))
-      on_completion(&wc, i);
+      on_completion(&wc, i, &start, &sum);
   }
 
   return NULL;
@@ -327,7 +345,6 @@ void register_memory(struct connection *conn, void* mr)
     
   }
   
-
   TEST_Z(conn->send_mr = ibv_reg_mr(
     s_ctx[num_connections]->pd, 
     conn->send_msg, 

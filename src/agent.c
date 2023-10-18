@@ -73,6 +73,10 @@ int start_rdma_session(int shm_fd, int podID) {
     /* memory map the shared memory object, and pass it as context to the connection */
     void *shm_ptr = mmap(0, RDMA_DEFAULT_BUFFER_SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
     
+    /*struct control_plane* ctx = (struct control_plane*)malloc(sizeof(struct control_plane));
+    ctx->shm_ptr = shm_ptr;
+    ctx->podID = podID;*/
+
     TEST_NZ(getaddrinfo(peer_ip, peer_port, NULL, &addr));
 
     TEST_Z(ec = rdma_create_event_channel());
@@ -117,7 +121,7 @@ void *handleNewPod(void *clientSocket) {
     /* create the shared memory object */
     char shm_name[MAX_LEN];
     memset(shm_name, 0, MAX_LEN);
-    sprintf(shm_name, "%s-%d", Q_NAME, num_pods++);
+    sprintf(shm_name, "%s-%d", Q_NAME, podID); // TODO in this simple experiment podID is just incremental
     shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
     if (shm_fd == -1) {
         perror("Error creating shared memory object");
