@@ -85,18 +85,19 @@ int get_shm_fd(const char* host, char *shm_name) {
         exit(EXIT_FAILURE);
     }
 
-    /* seed random */
-    srand(time(NULL));
-
+    
     /* Send pod ID */
-    int podID = htonl(rand() % 10);
+    uint32_t podID = htonl((uint32_t)getpid());
+    printf("New POD, pid: %d\n", (uint32_t)getpid());
+
     if (send(clientSocket, &podID, sizeof(podID), 0) == -1) {
         perror("Error sending data");
-    } else {
-        printf("New POD, id: %d\n", ntohl(podID));
-    }
+    } 
 
-    read(clientSocket, shm_name, sizeof(shm_name));
+    /* seed random */
+    srand(podID);
+
+    recv(clientSocket, shm_name, MAX_LEN, 0);
     fprintf(stdout, "MicroView control plane assigned memory region: %s\n", shm_name);
     // Close the socket
     close(clientSocket);
@@ -109,6 +110,7 @@ int main(int argc, char *argv[])
 {
     // open TCP connection and ask for identifier
     char shm_name[MAX_LEN];
+    memset(shm_name, 0, MAX_LEN);
     get_shm_fd(argv[1], shm_name);
     // start producing metrics writing on the queue
     produce_metrics(shm_name);

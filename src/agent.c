@@ -25,9 +25,6 @@
 
 static char peer_ip[MAX_LEN] = "192.168.200.2";
 static char peer_port[MAX_LEN];
-static int num_pods = 0;
-//static char mode[MAX_LEN];
-
 
 extern int block_size;
 extern int num_mr;
@@ -107,7 +104,7 @@ int start_rdma_session(int shm_fd, int podID) {
 // Function to handle client requests
 void *handleNewPod(void *clientSocket) {
     int clientSock = *((int *)clientSocket);
-    int podID;
+    uint32_t podID;
     int shm_fd;
 
     /* Receive the integer from the client */
@@ -116,22 +113,24 @@ void *handleNewPod(void *clientSocket) {
         exit(EXIT_FAILURE);
     }
     podID = ntohl(podID);
-    printf("New pod %d registered\n", podID);
+    printf("New pod with pid %d registered\n", podID);
 
     /* create the shared memory object */
     char shm_name[MAX_LEN];
     memset(shm_name, 0, MAX_LEN);
-    sprintf(shm_name, "%s-%d", Q_NAME, podID); // TODO in this simple experiment podID is just incremental
+    sprintf(shm_name, "%s-%u", Q_NAME, podID);
+
     shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
     if (shm_fd == -1) {
         perror("Error creating shared memory object");
         exit(EXIT_FAILURE);
     }
-    printf("MicroView agent created memory region with file descriptor: %d, %s\n", shm_fd, shm_name);
+    printf("MicroView agent created memory region %s\n", shm_name);
     /* configure the size of the shared memory object */
     ftruncate(shm_fd, MAX_SIZE);
-    // Write the name back to the opened socket 
-    write(clientSock, &shm_name, sizeof(shm_name));
+    
+    // Write the name back to the opened socket
+    send(clientSock, &shm_name, MAX_LEN, 0);
 
     // Close the tcp socket
     close(clientSock);

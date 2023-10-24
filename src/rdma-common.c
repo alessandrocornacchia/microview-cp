@@ -1,5 +1,6 @@
 #include "rdma-common.h"
 
+/* global variables visible only within this module */
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
 static void on_completion(struct ibv_wc *, int id, struct timespec *start, double *sum);
@@ -11,9 +12,14 @@ static enum mode s_mode = M_WRITE;
 static enum role role;
 static int num_wr = 0;
 
+/* global variable visibile outside of the module */
 int block_size;
 int num_mr;
 int num_connections = 0;
+
+int read_remote[RDMA_MAX_CONNECTIONS] = {0}; // synchronization variable for posting READ requests
+pthread_mutex_t lock[RDMA_MAX_CONNECTIONS];
+pthread_cond_t cond_poll_agent[RDMA_MAX_CONNECTIONS];
 
 void die(const char *reason)
 {
@@ -52,7 +58,7 @@ struct connection* build_connection(struct rdma_cm_id *id)
   post_receives(conn);
 
   num_connections++;  // TODO investigate why shit happens if we comment this
-
+  
   return conn;
 
 }
@@ -177,10 +183,9 @@ void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum
       }
       
       conn->recv_state = RS_DONE_RECV;
-      // memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
-      //  TODO manage output
+      //  TODO here should manage sketch output 
       printf("Received control information from server\n");
-      post_receives(conn); /* only rearm for MSG_DONE */
+      post_receives(conn); /* only rearm for MSG_DONE (actually for receving sketch output) */
       
     }
     else
@@ -189,7 +194,8 @@ void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum
       printf("send MR completed successfully.\n");
     }
 
-    // TODO connection tear-down performed asynchronously when pod is dead (implement watch thread)
+    // TODO connection tear-down is now performed only when pod is dead -> remove this and 
+    // implement watch thread
     if (conn->send_state == SS_DONE_SENT && conn->recv_state == RS_DONE_RECV)
     {
       printf("remote buffer: %s\n", get_peer_message_region(conn));
@@ -201,19 +207,26 @@ void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum
   {
 
     if (wc->opcode & IBV_WC_RECV)
+    /* 1. if completion is a RECV: 
+      receive remote memory region of the peer, i.e., rkey where to read from 
+    */
     {
       conn->recv_state++;
 
       if (conn->recv_msg->type == MSG_MR)
       {
+        // content of message is struct with remote memory region information (e.g., rkey), make copy
         memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
-        post_receives(conn); 
         /* only rearm for other control messages from agent on host, e.g., MSG_DONE to disconnect */
-        printf("Wait for initialization....\n");
+        post_receives(conn);
+        printf("Wait to receive remote MR ....\n");
         //sleep(10); // TODO remove, just gives time to all pods to be generated
       }
     }
     else
+    /* 2. else completion is a READ/WRITE completion :
+    now we can start reading from remote memory region 
+    */
     {
       struct timespec end;
       clock_gettime(CLOCK_REALTIME, &end); // get initial time-stamp
@@ -227,7 +240,7 @@ void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum
     }
 
     // if we received MR from the other party, we can start read/write operations
-    // TODO should read from multiple MRs here
+    // TODO implement the case where we read multiple MRs here
     if (conn->recv_state == RS_MR_RECV)
     {
       struct ibv_send_wr wr, *bad_wr = NULL;
@@ -250,16 +263,20 @@ void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum
       sge.length = RDMA_DEFAULT_BUFFER_SIZE;
       sge.lkey = conn->rdma_local_mr->lkey;
 
-      
-      sleep(2);
-      //sleep(5);
+      /* wait to be signaled before sending read request */
+      pthread_mutex_lock(&lock[i]);
+      while (read_remote[i] == 0) {
+        pthread_cond_wait(&cond_poll_agent[i], &lock[i]);
+        //printf("Posting READ request to remote pod-%d\n", i);
+      }
+      read_remote[i] = 0;
+      pthread_mutex_unlock(&lock[i]);
+
+
       // stop-and-wait: send new read after receiving the previous one
-      clock_gettime(CLOCK_REALTIME, start); // get initial time-stamp
-      //if (num_wr < 1000) {
-      
+      clock_gettime(CLOCK_REALTIME, start); // start clock
       TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
-        //num_wr++;
-      //}
+      
       // conn->send_msg->type = MSG_DONE;
       // send_message(conn);
     }

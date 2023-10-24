@@ -15,6 +15,7 @@
 #define RDMA_DEFAULT_BUFFER_SIZE 1024
 #define RDMA_MAX_CONNECTIONS 1024
 
+
 enum mode {
   M_WRITE,
   M_READ
