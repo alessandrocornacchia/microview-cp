@@ -13,9 +13,12 @@ static enum role role;
 static int num_wr = 0;
 
 /* global variable visibile outside of the module */
-int block_size;
+uint32_t block_size;
 int num_mr;
 int num_connections = 0;
+
+// to compute latency from first to last packet
+struct latency_meter global_lm;
 
 /* used only by nic agent : tick and poll_cq */
 int read_remote[RDMA_MAX_CONNECTIONS] = {0}; // synchronization variable for posting READ requests
@@ -254,6 +257,7 @@ void on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm)
       if (lm->num_samples == lm->size) {
         lm->size *= 2;
         lm->samples = realloc(lm->samples, sizeof(double)*lm->size);
+        //lm->samples_total = realloc(lm->samples_total, sizeof(double)*lm->size);
       }
       lm->samples[lm->num_samples++] = t_ns;
 
@@ -280,7 +284,7 @@ void on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm)
       rdma_remote_region on the other end. Otherwise, content from the other
       side rdma_remote_region is fetched into rdma_local_region. */
       sge.addr = (uintptr_t)conn->rdma_local_region;
-      sge.length = RDMA_DEFAULT_BUFFER_SIZE;
+      sge.length = block_size; //RDMA_DEFAULT_BUFFER_SIZE;
       sge.lkey = conn->rdma_local_mr->lkey;
 
       /* wait to be signaled before sending read request */
@@ -322,6 +326,7 @@ void * poll_cq(void *ctx)
   struct latency_meter lm;
   lm.size = 100;  // initial size
   lm.samples = (double*)malloc(sizeof(double)*lm.size);
+  //lm.samples_total = (double*)malloc(sizeof(double)*lm.size);
   lm.sum = 0;
     
   while (1) {
@@ -403,7 +408,8 @@ void register_memory(struct connection *conn, void* mr)
       conn->rdma_local_region = mr;
       conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
     } else {
-      conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
+      printf("Allocating MR of size %dB\n",block_size);
+      conn->rdma_local_region = malloc(block_size);
 //      conn->rdma_remote_region_2 = malloc(RDMA_DEFAULT_BUFFER_SIZE);
       conn->rdma_remote_region = mr;
       
@@ -411,20 +417,20 @@ void register_memory(struct connection *conn, void* mr)
   } else {
     // TODO server should not even allocate this memory as it is useless
     conn->mr_in_heap = 1;
-    conn->rdma_local_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);
-    conn->rdma_remote_region = malloc(RDMA_DEFAULT_BUFFER_SIZE);  
+    conn->rdma_local_region = malloc(block_size);
+    conn->rdma_remote_region = malloc(block_size);  
   }
 
-  // in any case we allocate this memory
-  printf("Allocating %d memory regions of size %dB\n", num_mr, block_size);
-  conn->rdma_remote_region_vec = malloc(num_mr * sizeof(char*));
-  for (int i=0; i < num_mr; i++)
-  {
-    conn->rdma_remote_region_vec[i] = malloc(block_size);
-    memset(conn->rdma_remote_region_vec[i], 0, block_size);
-    sprintf(conn->rdma_remote_region_vec[i], "message from active/client side with pid %d", getpid());
+  // TODO uncomment for multiple scattered MRs
+  // printf("Allocating %d memory regions of size %dB\n", num_mr, block_size);
+  // conn->rdma_remote_region_vec = malloc(num_mr * sizeof(char*));
+  // for (int i=0; i < num_mr; i++)
+  // {
+  //   conn->rdma_remote_region_vec[i] = malloc(block_size);
+  //   memset(conn->rdma_remote_region_vec[i], 0, block_size);
+  //   sprintf(conn->rdma_remote_region_vec[i], "message from active/client side with pid %d", getpid());
     
-  }
+  // }
   
   TEST_Z(conn->send_mr = ibv_reg_mr(
     s_ctx[num_connections]->pd, 
@@ -441,27 +447,27 @@ void register_memory(struct connection *conn, void* mr)
   TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
     s_ctx[num_connections]->pd, 
     conn->rdma_local_region, 
-    RDMA_DEFAULT_BUFFER_SIZE, 
+    block_size, // RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? 0 : IBV_ACCESS_LOCAL_WRITE)));
 
   TEST_Z(conn->rdma_remote_mr = ibv_reg_mr(
     s_ctx[num_connections]->pd, 
     conn->rdma_remote_region, 
-    RDMA_DEFAULT_BUFFER_SIZE, 
+    block_size, // RDMA_DEFAULT_BUFFER_SIZE, 
     ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
 
 
-  // memory map different blocks
-  conn->rdma_remote_mr_vec = malloc(num_mr * sizeof(struct ibv_mr*));
-  for (int i=0; i < num_mr; i++)
-  {
-    TEST_Z(conn->rdma_remote_mr_vec[i] = ibv_reg_mr(
-    s_ctx[num_connections]->pd, 
-    conn->rdma_remote_region_vec[i], 
-    block_size, 
-    ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
+  // TODO uncomment for having more scattered MRs
+  // conn->rdma_remote_mr_vec = malloc(num_mr * sizeof(struct ibv_mr*));
+  // for (int i=0; i < num_mr; i++)
+  // {
+  //   TEST_Z(conn->rdma_remote_mr_vec[i] = ibv_reg_mr(
+  //   s_ctx[num_connections]->pd, 
+  //   conn->rdma_remote_region_vec[i], 
+  //   block_size, 
+  //   ((s_mode == M_WRITE) ? (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE) : IBV_ACCESS_REMOTE_READ)));
 
-  }
+  // }
   
 }
 

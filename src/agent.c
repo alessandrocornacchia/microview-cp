@@ -62,7 +62,7 @@ int start_rdma_session(int shm_fd, int podID) {
     set_role(R_CLIENT);
 
     /* memory map the shared memory object, and pass it as context to the connection */
-    void *shm_ptr = mmap(0, RDMA_DEFAULT_BUFFER_SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    void *shm_ptr = mmap(0, block_size, PROT_WRITE, MAP_SHARED, shm_fd, 0);
     
     /*struct control_plane* ctx = (struct control_plane*)malloc(sizeof(struct control_plane));
     ctx->shm_ptr = shm_ptr;
@@ -153,7 +153,7 @@ void *handleNewPod(void *clientSocket) {
     }
     printf("MicroView agent created memory region %s\n", shm_name);
     /* configure the size of the shared memory object */
-    ftruncate(shm_fd, MAX_SIZE);
+    ftruncate(shm_fd, block_size);
     
     // Write the name back to the opened socket
     send(clientSock, &shm_name, MAX_LEN, 0);

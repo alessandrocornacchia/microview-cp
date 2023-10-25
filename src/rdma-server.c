@@ -8,6 +8,8 @@ static void usage(const char *argv0);
 static void * tick(void *);
 
 static uint16_t sampling_interval;
+
+extern uint32_t block_size;
 extern int read_remote[RDMA_MAX_CONNECTIONS];
 extern int num_connections;
 extern pthread_mutex_t lock[RDMA_MAX_CONNECTIONS];
@@ -21,7 +23,7 @@ int main(int argc, char **argv)
   struct rdma_event_channel *ec = NULL;
   uint16_t port = 0;
 
-  if (argc != 3)
+  if (argc != 4)
     usage(argv[0]);
 
   /*if (strcmp(argv[1], "write") == 0)
@@ -43,7 +45,7 @@ int main(int argc, char **argv)
   TEST_NZ(rdma_listen(listener, 10)); /* backlog=10 is arbitrary */
 
   port = ntohs(rdma_get_src_port(listener));
-
+  block_size = (uint32_t)atoi(argv[3]);
   // start tick thread to synchronize container reads
   
   for (int i = 0; i < RDMA_MAX_CONNECTIONS; i++) {
@@ -144,6 +146,6 @@ int on_event(struct rdma_cm_event *event)
 
 void usage(const char *argv0)
 {
-  fprintf(stderr, "usage: %s <port> <sampling interval [sec]>\n", argv0);
+  fprintf(stderr, "usage: %s <port> <sampling interval [sec]> <block size>\n", argv0);
   exit(1);
 }
