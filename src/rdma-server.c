@@ -102,7 +102,7 @@ int on_connect_request(struct rdma_cm_id *id)
 {
   struct rdma_conn_param cm_params;
 
-  printf("received connection request.\n");
+  printf("\nreceived connection request.\n");
   build_connection(id);
   build_params(&cm_params);
   sprintf(get_local_message_region(id->context), "Hello from MicroView NIC agent, pid %d", getpid());

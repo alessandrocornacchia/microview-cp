@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/shm.h>
 #include <sys/mman.h>
+#include <signal.h>
 
 #include "rdma-common.h"
 #include "rdma-client.h"
@@ -29,23 +30,16 @@ static char peer_port[MAX_LEN];
 extern int block_size;
 extern int num_mr;
 
-int consume_metrics(int shm_fd, int podID)
-{
-    char buffer[MAX_SIZE];
+void * poll_pids(void* args);
 
-    /* memory map the shared memory object */
-    void *ptr = mmap(0, MAX_SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
-     
-    do {
-        memcpy(buffer, ptr, MAX_SIZE);
-        printf("POD %d metric: %s\n", podID, buffer);
-        sleep(5); /* actually will be the agent on the smartNIC to consume then */
-    } while (0 != strncmp(buffer, M_EXIT, strlen(M_EXIT)));
-
-    /* remove shared memory object */
-    shm_unlink(Q_NAME);
-    return 0;
-}
+/* used by host agent */
+pthread_mutex_t cp_mutex;
+struct control_plane {
+    int pod_pids[RDMA_MAX_CONNECTIONS];
+    struct rdma_cm_id* conn[RDMA_MAX_CONNECTIONS];
+    int num_pods;
+};
+struct control_plane cp;
 
 
 int start_rdma_session(int shm_fd, int podID) {
@@ -82,6 +76,13 @@ int start_rdma_session(int shm_fd, int podID) {
 
     freeaddrinfo(addr);
 
+    /* register new pod in control plane (watcher thread will track) */
+    pthread_mutex_lock(&cp_mutex);
+    cp.pod_pids[cp.num_pods] = podID;
+    cp.conn[cp.num_pods] = conn;
+    cp.num_pods++;
+    pthread_mutex_unlock(&cp_mutex);
+
     while (rdma_get_cm_event(ec, &event) == 0)
     {
         struct rdma_cm_event event_copy;
@@ -100,6 +101,31 @@ int start_rdma_session(int shm_fd, int podID) {
     return 0;
 }
 
+// function to handle termination of RDMA connections for dead pods
+void * poll_pids(void* args) {
+    while (1) {
+        
+        sleep(2);
+        
+        pthread_mutex_lock(&cp_mutex);
+        for (int i=0; i < cp.num_pods; i++)
+        {
+            if (cp.pod_pids[i] != -1) {    // set as -1 after they are dead
+                // check process id of the pod and terminate if it's no more active
+                if (kill(cp.pod_pids[i], 0) == -1) {
+                    
+                    printf("Pod %d is not active anymore, closing RDMA connection %d\n", cp.pod_pids[i], i);
+                    
+                    rdma_disconnect(cp.conn[i]);
+                    //on_disconnect(cp.conn[i]);
+                    
+                    cp.pod_pids[i] = -1;
+                }
+            } 
+        }
+        pthread_mutex_unlock(&cp_mutex);
+    }
+}
 
 // Function to handle client requests
 void *handleNewPod(void *clientSocket) {
@@ -113,7 +139,7 @@ void *handleNewPod(void *clientSocket) {
         exit(EXIT_FAILURE);
     }
     podID = ntohl(podID);
-    printf("New pod with pid %d registered\n", podID);
+    printf("\n** New pod with pid %d registered **\n", podID);
 
     /* create the shared memory object */
     char shm_name[MAX_LEN];
@@ -142,6 +168,12 @@ void *handleNewPod(void *clientSocket) {
     printf("Starting RDMA session\n");
     start_rdma_session(shm_fd, podID);
 
+    // when we arrive at this point means the watcher thread has disconnected
+    // rdma session, we can unlink shared memory segment and exit the thread
+    // who served this connection. 
+    // TODO don't know why this unlink fails..
+    
+    //TEST_Z(shm_unlink(shm_name));
     pthread_exit(NULL);
 }
 
@@ -182,6 +214,13 @@ int run() {
     }
 
     printf("Server is listening on port 12345...\n");
+
+    // watch active pods and terminate rdma connections for those non active
+    pthread_mutex_init(&cp_mutex, NULL);
+    cp.num_pods = 0;
+    pthread_t pptid;
+    TEST_NZ(pthread_create(&pptid, NULL, poll_pids, NULL));
+    pthread_detach(pptid);
 
     // Accept and handle incoming connections in a loop
     while (1) {

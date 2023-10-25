@@ -61,6 +61,7 @@ struct connection {
   char **rdma_remote_region_vec;
 
   int mr_in_heap;
+  int logical_id; // incremental numbering
 
   enum {
     SS_INIT,
@@ -76,10 +77,16 @@ struct connection {
   } recv_state;
 };
 
-struct control_plane {
-  int shm_ptr;
-  int pod_id;
+/* measure ib_verbs latency at application layer */
+struct latency_meter
+{
+  struct timespec start;
+  double sum;
+  double* samples;
+  int num_samples;
+  int size;
 };
+
 
 struct context {
   struct ibv_context *ctx;

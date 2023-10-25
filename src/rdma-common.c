@@ -3,7 +3,7 @@
 /* global variables visible only within this module */
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
-static void on_completion(struct ibv_wc *, int id, struct timespec *start, double *sum);
+static void on_completion(struct ibv_wc *, int id, struct latency_meter* lm);
 static void * poll_cq(void *);
 static void send_message(struct connection *conn);
 
@@ -17,7 +17,9 @@ int block_size;
 int num_mr;
 int num_connections = 0;
 
+/* used only by nic agent : tick and poll_cq */
 int read_remote[RDMA_MAX_CONNECTIONS] = {0}; // synchronization variable for posting READ requests
+int terminate[RDMA_MAX_CONNECTIONS] = {0}; // stop polling cqs
 pthread_mutex_t lock[RDMA_MAX_CONNECTIONS];
 pthread_cond_t cond_poll_agent[RDMA_MAX_CONNECTIONS];
 
@@ -43,10 +45,11 @@ struct connection* build_connection(struct rdma_cm_id *id)
   TEST_NZ(rdma_create_qp(id, s_ctx[num_connections]->pd, &qp_attr));
 
   void *local_mr = id->context; // we use the context to pass memory region to map -- could pass podID from here
-
+  
   id->context = conn = (struct connection *)malloc(sizeof(struct connection));
 
   conn->id = id;
+  conn->logical_id = num_connections;
   conn->qp = id->qp;
 
   conn->send_state = SS_INIT;
@@ -87,6 +90,7 @@ void build_context(struct ibv_context *verbs)
   int *i = malloc(sizeof(int)); // thread identifier
   *i = num_connections;
   TEST_NZ(pthread_create(&s_ctx[num_connections]->cq_poller_thread, NULL, poll_cq, (void*)i));
+
 }
 
 void build_params(struct rdma_conn_param *params)
@@ -115,6 +119,12 @@ void destroy_connection(void *context)
 {
   struct connection *conn = (struct connection *)context;
 
+  /* terminate polling thread */
+  int i = conn->logical_id;
+  pthread_mutex_lock(&lock[i]);
+  terminate[i] = 1;
+  pthread_mutex_unlock(&lock[i]);
+
   rdma_destroy_qp(conn->id);
 
   ibv_dereg_mr(conn->send_mr);
@@ -124,11 +134,11 @@ void destroy_connection(void *context)
 
   free(conn->send_msg);
   free(conn->recv_msg);
-  if (conn->mr_in_heap) {
+  if (conn->mr_in_heap) { // TODO check this logic
     free(conn->rdma_local_region);
     free(conn->rdma_remote_region);
   } else {
-    if (s_mode == M_WRITE)
+    if (s_mode == M_WRITE)  // TODO remove we only support read
     {
       free(conn->rdma_local_region);
       conn->rdma_remote_region = NULL;
@@ -143,6 +153,7 @@ void destroy_connection(void *context)
   rdma_destroy_id(conn->id);
 
   free(conn);
+  printf("connection destroyed\n");
 }
 
 void * get_local_message_region(void *context)
@@ -161,13 +172,16 @@ char * get_peer_message_region(struct connection *conn)
     return conn->rdma_local_region;
 }
 
-void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum)
+void on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm)
 {
 
   struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
 
-  if (wc->status != IBV_WC_SUCCESS)
-    die("on_completion: status is not IBV_WC_SUCCESS.");
+  if (wc->status != IBV_WC_SUCCESS) {
+    //die("on_completion: status is not IBV_WC_SUCCESS.");
+    fprintf(stderr, "on_completion: status is not IBV_WC_SUCCESS.\n");
+    return;
+  }
 
   if (role == R_CLIENT)
   {
@@ -230,13 +244,19 @@ void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum
     {
       struct timespec end;
       clock_gettime(CLOCK_REALTIME, &end); // get initial time-stamp
-      double t_ns = (double)(end.tv_sec - start->tv_sec) * 1.0e9 +
-              (double)(end.tv_nsec - start->tv_nsec);
+      double t_ns = (double)(end.tv_sec - lm->start.tv_sec) * 1.0e9 +
+              (double)(end.tv_nsec - lm->start.tv_nsec);
       
-      *sum += t_ns;        
       conn->send_state = SS_RDMA_SENT;
       printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", i, get_peer_message_region(conn), t_ns);
-      //printf("%f\n", (*sum)/1000);
+      
+      lm->sum += t_ns;        
+      if (lm->num_samples == lm->size) {
+        lm->size *= 2;
+        lm->samples = realloc(lm->samples, sizeof(double)*lm->size);
+      }
+      lm->samples[lm->num_samples++] = t_ns;
+
     }
 
     // if we received MR from the other party, we can start read/write operations
@@ -270,11 +290,14 @@ void on_completion(struct ibv_wc *wc, int i, struct timespec* start, double* sum
         //printf("Posting READ request to remote pod-%d\n", i);
       }
       read_remote[i] = 0;
+      if (terminate[i]) { // check if connection has been closed
+        pthread_mutex_unlock(&lock[i]);
+        return;
+      }
       pthread_mutex_unlock(&lock[i]);
 
-
       // stop-and-wait: send new read after receiving the previous one
-      clock_gettime(CLOCK_REALTIME, start); // start clock
+      clock_gettime(CLOCK_REALTIME, &(lm->start)); // start clock
       TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
       
       // conn->send_msg->type = MSG_DONE;
@@ -296,16 +319,57 @@ void * poll_cq(void *ctx)
   int i = *((int*)ctx);
   printf("Polling on connection %d\n", i);
   
-  struct timespec start;
-  double sum = 0;
+  struct latency_meter lm;
+  lm.size = 100;  // initial size
+  lm.samples = (double*)malloc(sizeof(double)*lm.size);
+  lm.sum = 0;
     
   while (1) {
+
+    pthread_mutex_lock(&lock[i]);
+    int exit_thread = terminate[i];
+    pthread_mutex_unlock(&lock[i]);
+
+    if (exit_thread) {
+      
+//      printf("Termination of poll_cq thread %d\n", i);
+      
+      // write samples to file
+      char filename[100];
+      sprintf(filename, "latency_samples_%d.txt", i);
+      FILE *f = fopen(filename, "w");
+      for (int j=0; j < lm.num_samples; j++)
+      {
+        fprintf(f, "%f\n", lm.samples[j]);
+      }
+      fclose(f);
+      free(lm.samples);
+      
+      pthread_exit(NULL);
+    }
+
     TEST_NZ(ibv_get_cq_event(s_ctx[i]->comp_channel, &cq, &ctx));
     ibv_ack_cq_events(cq, 1);
     TEST_NZ(ibv_req_notify_cq(cq, 0));
 
-    while (ibv_poll_cq(cq, 1, &wc))
-      on_completion(&wc, i, &start, &sum);
+
+    while (ibv_poll_cq(cq, 1, &wc)) 
+    {
+      // in the nic side, on_completion waits for signal to read, then returns.
+      // blocking stp-and-go behavior (is this what we want?)
+      // TODO check thread termination also here?
+      on_completion(&wc, i, &lm);
+    }
+
+    // uint8_t ret = 0; 
+    // do {
+    //   ret = ibv_poll_cq(cq, 1, &wc);
+    //   printf("polling\n");
+    //   if (ret)
+    //   {
+    //     on_completion(&wc, i, &lm);
+    //   }
+    // } while (ret);
   }
 
   return NULL;
