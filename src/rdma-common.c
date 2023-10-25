@@ -332,7 +332,7 @@ void * poll_cq(void *ctx)
 
     if (exit_thread) {
       
-//      printf("Termination of poll_cq thread %d\n", i);
+      printf("Termination of poll_cq thread %d\n", i);
       
       // write samples to file
       char filename[100];
