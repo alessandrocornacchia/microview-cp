@@ -16,16 +16,6 @@
 #define RDMA_MAX_CONNECTIONS 1024
 
 
-enum mode {
-  M_WRITE,
-  M_READ
-};
-
-enum role {
-  R_CLIENT,
-  R_SERVER
-};
-
 struct message {
   enum {
     MSG_MR,
@@ -58,9 +48,8 @@ struct connection {
 
   char *rdma_local_region;
   char *rdma_remote_region;
-  char **rdma_remote_region_vec;
+  //char **rdma_remote_region_vec;
 
-  int mr_in_heap;
   int logical_id; // incremental numbering
 
   enum {
@@ -77,6 +66,15 @@ struct connection {
   } recv_state;
 };
 
+struct context {
+  struct ibv_context *ctx;
+  struct ibv_pd *pd;
+  struct ibv_cq *cq;
+  struct ibv_comp_channel *comp_channel;
+
+  pthread_t cq_poller_thread;
+};
+
 /* measure ib_verbs latency at application layer */
 struct latency_meter
 {
@@ -88,27 +86,14 @@ struct latency_meter
 };
 
 
-struct context {
-  struct ibv_context *ctx;
-  struct ibv_pd *pd;
-  struct ibv_cq *cq;
-  struct ibv_comp_channel *comp_channel;
-
-  pthread_t cq_poller_thread;
-};
-
-
 void die(const char *reason);
 struct connection* build_connection(struct rdma_cm_id *id);
 void build_params(struct rdma_conn_param *params);
-void destroy_connection(void *context);
 void * get_local_message_region(void *context);
 void on_connect(void *context);
 void send_mr(void *context);
-void set_mode(enum mode m);
-void set_role(enum role m);
 void post_receives(struct connection *conn);
-void register_memory(struct connection *conn, void* local_mr);
 char * get_peer_message_region(struct connection *conn);
+double get_time_elapsed(struct latency_meter lm);
 
 #endif

@@ -8,7 +8,7 @@ OBJ_DIR	:= ./obj
 SRC_DIR	:= ./src
 CFLAGS  := -Wall -g -I${INC_DIR}
 
-APPS    := ${BIN_DIR}/agent ${BIN_DIR}/pod ${BIN_DIR}/rdma-nic
+APPS    := ${BIN_DIR}/agent ${BIN_DIR}/pod ${BIN_DIR}/agent-nic
 
 all: ${APPS}
 
@@ -20,10 +20,10 @@ ${OBJ_DIR}/%.o: ${SRC_DIR}/%.c
 ${BIN_DIR}/pod: ${OBJ_DIR}/pod.o
 	${LD} -o $@ $^ ${LDLIBS}
 
-${BIN_DIR}/agent: ${OBJ_DIR}/agent.o ${OBJ_DIR}/rdma-client.o ${OBJ_DIR}/rdma-common.o
+${BIN_DIR}/agent: ${OBJ_DIR}/agent.o ${OBJ_DIR}/rdma-agent.o ${OBJ_DIR}/rdma-common.o
 	${LD} -o $@ $^ ${LDLIBS}
 
-${BIN_DIR}/rdma-nic: ${OBJ_DIR}/rdma-server.o ${OBJ_DIR}/rdma-common.o
+${BIN_DIR}/agent-nic: ${OBJ_DIR}/agent-nic.o ${OBJ_DIR}/rdma-common.o
 	${LD} -o $@ $^ ${LDLIBS}
 
 clean:
