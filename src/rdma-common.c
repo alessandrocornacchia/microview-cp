@@ -5,8 +5,8 @@ static void send_message(struct connection *conn);
 /* global variable visibile outside of the module */
 struct context *s_ctx[RDMA_MAX_CONNECTIONS];
 uint32_t block_size;
-int num_mr;
 int num_connections = 0;
+int num_mr;
 
 void die(const char *reason)
 {

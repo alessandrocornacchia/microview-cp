@@ -6,7 +6,7 @@ static int on_disconnect(struct rdma_cm_id *id);
 static int on_event(struct rdma_cm_event *event);
 static void usage(const char *argv0);
 static void * tick(void *);
-static int on_completion(struct ibv_wc *, int id, struct latency_meter* lm);
+static int on_completion(struct ibv_wc *, int, struct latency_meter*, int*);
 static void * poll_cq(void *);
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
@@ -18,6 +18,7 @@ static uint16_t sampling_interval;
 extern struct context *s_ctx[RDMA_MAX_CONNECTIONS];
 extern int block_size;
 extern int num_connections;
+extern int num_mr;
 
 // to compute latency from first to last packet
 struct latency_meter global_lm;
@@ -37,9 +38,14 @@ int main(int argc, char **argv)
   struct rdma_event_channel *ec = NULL;
   uint16_t port = 0;
 
-  if (argc != 4)
+  if (argc == 1 && strcmp(argv[1], "-h") == 0) {
+      usage(argv[0]);
+      exit(0);
+  }
+  if (argc != 5)
+  {
     usage(argv[0]);
-
+  }
   memset(&addr, 0, sizeof(addr));
   addr.sin6_family = AF_INET6;
   
@@ -52,6 +58,7 @@ int main(int argc, char **argv)
 
   port = ntohs(rdma_get_src_port(listener));
   block_size = (uint32_t)atoi(argv[3]);
+  num_mr = (uint32_t)atoi(argv[4]);
   // start tick thread to synchronize container reads
   
   for (int i = 0; i < RDMA_MAX_CONNECTIONS; i++) {
@@ -156,7 +163,7 @@ int on_event(struct rdma_cm_event *event)
 
 void usage(const char *argv0)
 {
-  fprintf(stderr, "usage: %s <port> <sampling interval [sec]> <block size>\n", argv0);
+  fprintf(stderr, "usage: %s <port> <sampling interval [sec]> <block size> <num blocks>\n", argv0);
   exit(1);
 }
 
@@ -242,7 +249,7 @@ void * poll_cq(void *ctx)
   lm.samples = (double*)malloc(sizeof(double)*lm.size);
   
   int ret = 0;
-  
+  int num_read_completed = 0;
   while (!ret) {
 
     // wait for one completion event (blocking-call)
@@ -253,7 +260,7 @@ void * poll_cq(void *ctx)
     // next, we empty the CQ by processing all CQ events (non-blocking call)
     while (ibv_poll_cq(cq, 1, &wc)) 
     {
-      ret = on_completion(&wc, i, &lm);
+      ret = on_completion(&wc, i, &lm, &num_read_completed);
     }
 
   }
@@ -307,7 +314,7 @@ void build_qp_attr(struct ibv_qp_init_attr *qp_attr)
 }
 
 
-int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm)
+int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_read_completed)
 {
 
   struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
@@ -334,10 +341,13 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm)
   /* 2. else completion is a READ completion: start reading from remote memory region */
   {
     
-    double t_ns = record_time_elapsed(lm);
-    conn->send_state = SS_RDMA_SENT;
-    printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", 
-            i, get_peer_message_region(conn), t_ns);
+    if (++(*num_read_completed) == num_mr) 
+    {
+        double t_ns = record_time_elapsed(lm);
+        conn->send_state = SS_RDMA_SENT;
+        printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", 
+              i, get_peer_message_region(conn), t_ns);
+    }
 
     pthread_mutex_lock(&lock_global_lm);
     global_lm.num_finished++;
