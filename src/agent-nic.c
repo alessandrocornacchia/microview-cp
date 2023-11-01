@@ -14,6 +14,7 @@ static void register_memory(struct connection *conn);
 static void destroy_connection(void *context);
 
 static uint16_t sampling_interval;
+static int num_active_connections = 0;
 
 extern struct context *s_ctx[RDMA_MAX_CONNECTIONS];
 extern int block_size;
@@ -200,6 +201,7 @@ struct connection* build_connection(struct rdma_cm_id *id)
   // in the agent-nic there is no concurrency to create RDMA connections
   // this is thread safe
   num_connections++;
+  num_active_connections++;
   
   return conn;
 
@@ -221,7 +223,7 @@ void build_context(struct ibv_context *verbs)
 
   s_ctx[num_connections]->ctx = verbs;  // verbs are associated with rdma_cm_id
 
-  printf("Building completion channel for connection %d\n", num_connections);
+  /* for new connection requests can we use same pd, cq and qp, and completion channel without creating a new one ?*/
   TEST_Z(s_ctx[num_connections]->pd = ibv_alloc_pd(s_ctx[num_connections]->ctx));
   TEST_Z(s_ctx[num_connections]->comp_channel = ibv_create_comp_channel(s_ctx[num_connections]->ctx));
   TEST_Z(s_ctx[num_connections]->cq = ibv_create_cq(s_ctx[num_connections]->ctx, 10, NULL, s_ctx[num_connections]->comp_channel, 0)); /* cqe=10 is arbitrary */
@@ -250,6 +252,7 @@ void * poll_cq(void *ctx)
   
   int ret = 0;
   int num_read_completed = 0;
+
   while (!ret) {
 
     // wait for one completion event (blocking-call)
@@ -320,7 +323,7 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
   struct connection *conn = (struct connection *)(uintptr_t)wc->wr_id;
 
   if (wc->status != IBV_WC_SUCCESS) {
-    fprintf(stderr, "on_completion: status is not IBV_WC_SUCCESS.\n");
+    fprintf(stderr, "on_completion: status is not IBV_WC_SUCCESS: %d\n", wc->status);
     return 1;
   }
 
@@ -340,18 +343,19 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
   else
   /* 2. else completion is a READ completion: start reading from remote memory region */
   {
-    
+    printf("read completed\n");
     if (++(*num_read_completed) == num_mr) 
     {
         double t_ns = record_time_elapsed(lm);
         conn->send_state = SS_RDMA_SENT;
         printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", 
               i, get_peer_message_region(conn), t_ns);
+        *num_read_completed = 0;
     }
 
     pthread_mutex_lock(&lock_global_lm);
     global_lm.num_finished++;
-    if (global_lm.num_finished == num_connections) {
+    if (global_lm.num_finished == num_active_connections) {
       // if all connections have finished reading, then we can print the global latency
       double t_ns = record_time_elapsed(&global_lm);
       printf("global latency: %f [ns]\n", t_ns);
@@ -362,22 +366,44 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
   // we are in a state where we are ready to send READ requests
   if (conn->recv_state == RS_MR_RECV)
   {
-    struct ibv_send_wr wr, *bad_wr = NULL;
-    struct ibv_sge sge;
+    
+    struct ibv_send_wr *wr, *prev_wr, *head_wr, *bad_wr = NULL;
+    struct ibv_sge *sge;
 
-    memset(&wr, 0, sizeof(wr));
+    printf("%d\n", num_mr);
+    // prepare num_mr READ requests
+    for (int k=0; k < num_mr; k++) {
+      
+      // create new WR
+      printf("Creating %d-th READ request\n", k);
+      wr = malloc(sizeof(struct ibv_send_wr));
+      sge = malloc(sizeof(struct ibv_sge));
+      
+      memset(wr, 0, sizeof(*wr));
 
-    wr.wr_id = (uintptr_t)conn; // something that we specify and use as ID
-    wr.opcode = IBV_WR_RDMA_READ;
-    wr.sg_list = &sge;
-    wr.num_sge = 1;
-    wr.send_flags = IBV_SEND_SIGNALED;
-    wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
-    wr.wr.rdma.rkey = conn->peer_mr.rkey;
+      wr->wr_id = (uintptr_t)conn; // something that we specify and use as ID
+      wr->opcode = IBV_WR_RDMA_READ;
+      wr->sg_list = sge;
+      wr->num_sge = 1;
+      wr->send_flags = IBV_SEND_SIGNALED;
+      wr->wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
+      wr->wr.rdma.rkey = conn->peer_mr.rkey;
 
-    sge.addr = (uintptr_t)conn->rdma_local_region;
-    sge.length = block_size;
-    sge.lkey = conn->rdma_local_mr->lkey;
+      sge->addr = (uintptr_t)conn->rdma_local_region[k];
+      sge->length = block_size;
+      sge->lkey = conn->rdma_local_mr[k]->lkey;
+
+      // build linked list
+      if (k == 0) {
+        head_wr = wr;
+      } else {
+        prev_wr->next = wr;
+      }
+      
+      prev_wr = wr;
+      
+    }
+    
 
     /* wait to be signaled before sending read request */
     pthread_mutex_lock(&lock[i]);
@@ -395,7 +421,7 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
     
     // send new READ
     clock_gettime(CLOCK_REALTIME, &(lm->start)); // start clock
-    TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));    
+    TEST_NZ(ibv_post_send(conn->qp, head_wr, &bad_wr));    
     
   } 
   return 0;
@@ -426,7 +452,8 @@ void register_memory(struct connection *conn)
   conn->send_msg = malloc(sizeof(struct message));
   conn->recv_msg = malloc(sizeof(struct message));
   
-  conn->rdma_local_region = malloc(block_size);
+  //conn->rdma_local_region = malloc(num_mr * sizeof(char*));
+  //conn->rdma_local_mr = malloc(num_mr * sizeof(struct ibv_mr*));
   
   TEST_Z(conn->send_mr = ibv_reg_mr(
     s_ctx[num_connections]->pd, 
@@ -440,12 +467,18 @@ void register_memory(struct connection *conn)
     sizeof(struct message), 
     IBV_ACCESS_LOCAL_WRITE));
 
-  TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
-    s_ctx[num_connections]->pd, 
-    conn->rdma_local_region, 
-    block_size,
-    IBV_ACCESS_LOCAL_WRITE));
-  
+  // for (int i = 0; i < num_mr; i++) {
+    
+  //   conn->rdma_local_region[i] = malloc(block_size);
+  //   conn->rdma_local_mr[i] = malloc(sizeof(struct ibv_mr));
+
+  //   TEST_Z(conn->rdma_local_mr[i] = ibv_reg_mr(
+  //   s_ctx[num_connections]->pd, 
+  //   conn->rdma_local_region[i], 
+  //   block_size,
+  //   IBV_ACCESS_LOCAL_WRITE));
+  // }
+
 }
 
 
@@ -463,14 +496,21 @@ void destroy_connection(void *context)
 
   ibv_dereg_mr(conn->send_mr);
   ibv_dereg_mr(conn->recv_mr);
-  ibv_dereg_mr(conn->rdma_local_mr);
-
+  
+  for (int i=0; i<num_mr; i++) {
+    ibv_dereg_mr(conn->rdma_local_mr[i]);
+    free(conn->rdma_local_mr[i]);
+    free(conn->rdma_local_region[i]);
+  }
+  
   free(conn->send_msg);
   free(conn->recv_msg);
   free(conn->rdma_local_region);
+  free(conn->rdma_local_mr);
   
   rdma_destroy_id(conn->id);
 
   free(conn);
+  num_active_connections--;
   printf("connection destroyed\n");
 }

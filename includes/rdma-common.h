@@ -36,17 +36,15 @@ struct connection {
   struct ibv_mr *recv_mr;
   struct ibv_mr *send_mr;
   
-  struct ibv_mr *rdma_local_mr;
+  struct ibv_mr **rdma_local_mr;
   struct ibv_mr *rdma_remote_mr;
-
-  struct ibv_mr **rdma_remote_mr_vec;
 
   struct ibv_mr peer_mr;
 
   struct message *recv_msg;
   struct message *send_msg;
 
-  char *rdma_local_region;
+  char **rdma_local_region;
   char *rdma_remote_region;
   //char **rdma_remote_region_vec;
 
