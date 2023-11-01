@@ -75,7 +75,17 @@ int get_shm_fd(const char* host, char *shm_name) {
     // Configure server address
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(12345);
+    // read port value from .port file
+    FILE *fp;
+    fp = fopen(".port", "r");
+    if (fp == NULL) {
+        perror("Error opening .port file");
+        exit(EXIT_FAILURE);
+    }
+    char port[8];
+    fgets(port, 8, fp);
+    fclose(fp);
+    serverAddr.sin_port = htons(atoi(port));
     serverAddr.sin_addr.s_addr = inet_addr(inet_ntoa(*address));
 
     // Connect to the server

@@ -78,8 +78,9 @@ int on_route_resolved(struct rdma_cm_id *id)
 
   printf("route resolved.\n");
   build_params(&cm_params);
+  
   TEST_NZ(rdma_connect(id, &cm_params));
-
+  
   return 0;
 }
 
@@ -92,8 +93,7 @@ struct connection* build_connection(struct rdma_cm_id *id)
   struct ibv_qp_init_attr qp_attr;
 
   pthread_mutex_lock(&nc_mutex);
-  int conn_id = num_connections++;
-  printf("Num connections: %d\n", conn_id);
+  int conn_id = num_connections++;  // make copy of connection id
   pthread_mutex_unlock(&nc_mutex);
 
   build_context(id->verbs, conn_id);
@@ -275,8 +275,7 @@ void destroy_connection(void *context)
 
   free(conn->send_msg);
   free(conn->recv_msg);
-  free(conn->rdma_remote_region);
-  
+
   rdma_destroy_id(conn->id);
 
   free(conn);

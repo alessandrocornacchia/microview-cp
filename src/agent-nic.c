@@ -21,6 +21,7 @@ extern int num_connections;
 
 // to compute latency from first to last packet
 struct latency_meter global_lm;
+pthread_mutex_t lock_global_lm = PTHREAD_MUTEX_INITIALIZER;
 
 /* sync on READs among different connections */
 int read_remote[RDMA_MAX_CONNECTIONS] = {0}; // synchronization variable for posting READ requests
@@ -81,14 +82,24 @@ int main(int argc, char **argv)
 
 void* tick(void *arg) {
   printf("Start reading process, read metrics every %d [sec]\n", sampling_interval);
+  
+  global_lm.size = 100;  // initial size
+  global_lm.samples = (double*)malloc(sizeof(double)*global_lm.size);
+  
   /* synchronize container reads */
   while (1) {
     
     sleep(sampling_interval);
-    
+
+    pthread_mutex_lock(&lock_global_lm);
+    global_lm.num_finished = 0; // restart counter
+    clock_gettime(CLOCK_REALTIME, &(global_lm.start)); // restart clock
+    pthread_mutex_unlock(&lock_global_lm);
+    printf("** READ metrics **\n");
     for (int i = 0; i < RDMA_MAX_CONNECTIONS; i++) {
         
         pthread_mutex_lock(&lock[i]);
+        
         read_remote[i] = 1;
         pthread_cond_signal(&cond_poll_agent[i]);
         pthread_mutex_unlock(&lock[i]);
@@ -106,7 +117,7 @@ int on_connect_request(struct rdma_cm_id *id)
   printf("\nreceived connection request.\n");
   build_connection(id);
   build_params(&cm_params);
-  sprintf(get_local_message_region(id->context), "Hello from MicroView NIC agent, pid %d", getpid());
+  
   TEST_NZ(rdma_accept(id, &cm_params));
 
   return 0;
@@ -203,6 +214,7 @@ void build_context(struct ibv_context *verbs)
 
   s_ctx[num_connections]->ctx = verbs;  // verbs are associated with rdma_cm_id
 
+  printf("Building completion channel for connection %d\n", num_connections);
   TEST_Z(s_ctx[num_connections]->pd = ibv_alloc_pd(s_ctx[num_connections]->ctx));
   TEST_Z(s_ctx[num_connections]->comp_channel = ibv_create_comp_channel(s_ctx[num_connections]->ctx));
   TEST_Z(s_ctx[num_connections]->cq = ibv_create_cq(s_ctx[num_connections]->ctx, 10, NULL, s_ctx[num_connections]->comp_channel, 0)); /* cqe=10 is arbitrary */
@@ -220,7 +232,7 @@ void * poll_cq(void *ctx)
   struct ibv_cq *cq;
   struct ibv_wc wc;
   int i = *((int*)ctx);
-  //free(ctx);
+  free(ctx);
   //ctx = NULL;
 
   printf("Polling on connection %d\n", i);
@@ -228,23 +240,19 @@ void * poll_cq(void *ctx)
   struct latency_meter lm;
   lm.size = 100;  // initial size
   lm.samples = (double*)malloc(sizeof(double)*lm.size);
-  lm.sum = 0;
   
   int ret = 0;
   
   while (!ret) {
 
     // wait for one completion event (blocking-call)
-    printf("Wait completion event for connection %d\n", i);
     TEST_NZ(ibv_get_cq_event(s_ctx[i]->comp_channel, &cq, &ctx)); 
     ibv_ack_cq_events(cq, 1); // acknowledge event (expensive needs mutex internally)
     TEST_NZ(ibv_req_notify_cq(cq, 0)); // request for notifcation for next event
-    printf("event acked\n");
-
+    
     // next, we empty the CQ by processing all CQ events (non-blocking call)
     while (ibv_poll_cq(cq, 1, &wc)) 
     {
-      printf("on completion\n");
       ret = on_completion(&wc, i, &lm);
     }
 
@@ -254,7 +262,7 @@ void * poll_cq(void *ctx)
     
     printf("Termination of poll_cq thread %d\n", i);
     
-    // write samples to file
+    // write latency samples referring to one pod
     char filename[100];
     sprintf(filename, "latency_samples_%d.txt", i);
     FILE *f = fopen(filename, "w");
@@ -264,7 +272,22 @@ void * poll_cq(void *ctx)
     }
     fclose(f);
     free(lm.samples);
-    
+
+    // write latency samples for completion of all pods to file
+    pthread_mutex_lock(&lock_global_lm);
+    // one thread only writes to file
+    if (global_lm.num_finished >= 0) {
+      global_lm.num_finished = INT_LEAST32_MIN;
+      sprintf(filename, "read_completion_latency.txt");
+      f = fopen(filename, "w");
+      for (int j=0; j < global_lm.num_samples; j++)
+      {
+        fprintf(f, "%f\n", global_lm.samples[j]);
+      }
+      fclose(f);
+      free(global_lm.samples);
+    }
+    pthread_mutex_unlock(&lock_global_lm);
     pthread_exit(NULL);
 }
 
@@ -311,19 +334,19 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm)
   /* 2. else completion is a READ completion: start reading from remote memory region */
   {
     
-    double t_ns = get_time_elapsed(*lm);
-
+    double t_ns = record_time_elapsed(lm);
     conn->send_state = SS_RDMA_SENT;
-    printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", i, get_peer_message_region(conn), t_ns);
-    
-    lm->sum += t_ns;        
-    if (lm->num_samples == lm->size) {
-      lm->size *= 2;
-      lm->samples = realloc(lm->samples, sizeof(double)*lm->size);
-      //lm->samples_total = realloc(lm->samples_total, sizeof(double)*lm->size);
-    }
-    lm->samples[lm->num_samples++] = t_ns;
+    printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", 
+            i, get_peer_message_region(conn), t_ns);
 
+    pthread_mutex_lock(&lock_global_lm);
+    global_lm.num_finished++;
+    if (global_lm.num_finished == num_connections) {
+      // if all connections have finished reading, then we can print the global latency
+      double t_ns = record_time_elapsed(&global_lm);
+      printf("global latency: %f [ns]\n", t_ns);
+    }
+    pthread_mutex_unlock(&lock_global_lm);
   }
 
   // we are in a state where we are ready to send READ requests
@@ -362,20 +385,26 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm)
     
     // send new READ
     clock_gettime(CLOCK_REALTIME, &(lm->start)); // start clock
-    printf("Sending READ request\n");
     TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));    
     
   } 
   return 0;
 }
 
-double get_time_elapsed(struct latency_meter lm)
+double record_time_elapsed(struct latency_meter *lm)
 /* return elapsed time in nanoseconds*/
 {
   struct timespec end;
   clock_gettime(CLOCK_REALTIME, &end); // get initial time-stamp
-  return (double)(end.tv_sec - lm.start.tv_sec) * 1.0e9 +
-          (double)(end.tv_nsec - lm.start.tv_nsec);
+  double t_ns =  (double)(end.tv_sec - lm->start.tv_sec) * 1.0e9 +
+          (double)(end.tv_nsec - lm->start.tv_nsec);
+    
+  if (lm->num_samples == lm->size) {
+    lm->size *= 2;
+    lm->samples = realloc(lm->samples, sizeof(double)*lm->size);
+  }
+  lm->samples[lm->num_samples++] = t_ns;
+  return t_ns;
 }
 
 

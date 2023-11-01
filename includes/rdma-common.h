@@ -79,7 +79,7 @@ struct context {
 struct latency_meter
 {
   struct timespec start;
-  double sum;
+  int num_finished;
   double* samples;
   int num_samples;
   int size;
@@ -94,6 +94,6 @@ void on_connect(void *context);
 void send_mr(void *context);
 void post_receives(struct connection *conn);
 char * get_peer_message_region(struct connection *conn);
-double get_time_elapsed(struct latency_meter lm);
+double record_time_elapsed(struct latency_meter *lm);
 
 #endif

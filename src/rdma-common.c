@@ -39,6 +39,7 @@ char * get_peer_message_region(struct connection *conn)
 void on_connect(void *context)
 {
   ((struct connection *)context)->connected = 1;
+  printf("Connected. \n");
 }
 
 
@@ -87,6 +88,6 @@ void send_mr(void *context)
 
   conn->send_msg->type = MSG_MR;
   memcpy(&conn->send_msg->data.mr, conn->rdma_remote_mr, sizeof(struct ibv_mr));
-
+  printf("Sending rkey. \n");
   send_message(conn);
 }

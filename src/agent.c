@@ -26,7 +26,6 @@
 
 static char peer_ip[MAX_LEN];
 static char peer_port[MAX_LEN];
-static int serverSocket;
 
 extern int block_size;
 extern int num_mr;
@@ -149,7 +148,6 @@ void *handleNewPod(void *clientSocketPtr) {
     close(clientSocket);
     free(clientSocketPtr);
 
-    printf("Starting RDMA session thread\n");
     start_rdma_session(shm_fd, podID);
 
     // when we arrive at this point means the watcher thread has disconnected
@@ -157,7 +155,7 @@ void *handleNewPod(void *clientSocketPtr) {
     // who served this connection. 
     // TODO don't know why this unlink fails..
     
-    //TEST_Z(shm_unlink(shm_name));
+    printf("RDMA connection for pid %d terminated\n", podID);
     pthread_exit(NULL);
 }
 
@@ -165,13 +163,16 @@ int run() {
     /* opens TCP server and listens for incoming conenction
        new pods will ask for shared memory region pointer on
        this connection. */
-    int clientSocket;
+    int clientSocket, serverSocket;
     struct sockaddr_in serverAddr, clientAddr;
     socklen_t clientAddrLen = sizeof(clientAddr);
     pthread_t tid;
 
     // Create a socket
     serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    char reuse = 1;
+    // avoids address already in use error
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)); 
     if (serverSocket == -1) {
         perror("Error creating socket");
         exit(EXIT_FAILURE);
@@ -180,7 +181,7 @@ int run() {
     // Configure server address
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(12345);
+//    serverAddr.sin_port = htons(12345);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
 
     // Bind the socket
@@ -190,14 +191,27 @@ int run() {
         exit(EXIT_FAILURE);
     }
 
+    // get port on which connection has started
+    socklen_t len = sizeof(serverAddr);
+    if (getsockname(serverSocket, (struct sockaddr *)&serverAddr, &len) == -1) {
+        perror("Error getting socket info");
+        close(serverSocket);
+        exit(EXIT_FAILURE);
+    }
+    printf("Server is listening on port %d...\n", ntohs(serverAddr.sin_port));
+    
+    // write to .port file (faster to be handled by pods connecting to it)
+    FILE *fp;
+    fp = fopen(".port", "w");
+    fprintf(fp, "%d", ntohs(serverAddr.sin_port));
+    fclose(fp);
+
     // Listen for incoming connections
     if (listen(serverSocket, 5) == -1) {
         perror("Error listening for connections");
         close(serverSocket);
         exit(EXIT_FAILURE);
     }
-
-    printf("Server is listening on port 12345...\n");
 
     // watch active pods and terminate rdma connections for those non-active
     pthread_mutex_init(&cp_mutex, NULL);
@@ -224,7 +238,7 @@ int run() {
         *clientSockPtr = clientSocket;
 
         // Create a new thread to handle the client request
-        if (pthread_create(&tid, NULL, handleNewPod, clientSockPtr) != 0) {
+        if (pthread_create(&tid, NULL, handleNewPod, (void*)clientSockPtr) != 0) {
             perror("Error creating thread");
             free(clientSockPtr);
             close(clientSocket);
@@ -252,7 +266,7 @@ int main(int argc, char *argv[])
 
     printf("Agent connects to peer %s on port %s, mode = %s\n", peer_ip, peer_port, "read");
     
-    signal(SIGINT, INThandler);
+    //signal(SIGINT, INThandler); handle CTRL+C 
     run();
 }
 
@@ -260,16 +274,4 @@ void usage(const char *argv0)
 {
   fprintf(stderr, "usage: %s <DPU-address> <DPU-port> <block size> <MR per pod>\n", argv0);
   exit(1);
-}
-
-
-/* handle Ctrl+C termination */
-void  INThandler(int sig)
-{
-    // close sockets and exit
-    printf("Terminating agent\n");
-    TEST_Z(close(serverSocket));
-    exit(0);
-    // TODO should also release other resources...
-
 }
