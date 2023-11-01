@@ -33,7 +33,9 @@ void * get_local_message_region(void *context)
 
 char * get_peer_message_region(struct connection *conn)
 {
-  return conn->rdma_local_region;
+  // TODO in this case we assume we read always from the same remote memory region
+  // (should get many rkeys for reading from different regions)
+  return conn->rdma_local_region[0];  
 }
 
 void on_connect(void *context)

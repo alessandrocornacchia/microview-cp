@@ -46,7 +46,6 @@ struct connection {
 
   char **rdma_local_region;
   char *rdma_remote_region;
-  //char **rdma_remote_region_vec;
 
   int logical_id; // incremental numbering
 

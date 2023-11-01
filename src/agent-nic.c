@@ -103,7 +103,7 @@ void* tick(void *arg) {
     global_lm.num_finished = 0; // restart counter
     clock_gettime(CLOCK_REALTIME, &(global_lm.start)); // restart clock
     pthread_mutex_unlock(&lock_global_lm);
-    printf("** READ metrics **\n");
+    //printf("** READ metrics **\n");
     for (int i = 0; i < RDMA_MAX_CONNECTIONS; i++) {
         
         pthread_mutex_lock(&lock[i]);
@@ -226,7 +226,7 @@ void build_context(struct ibv_context *verbs)
   /* for new connection requests can we use same pd, cq and qp, and completion channel without creating a new one ?*/
   TEST_Z(s_ctx[num_connections]->pd = ibv_alloc_pd(s_ctx[num_connections]->ctx));
   TEST_Z(s_ctx[num_connections]->comp_channel = ibv_create_comp_channel(s_ctx[num_connections]->ctx));
-  TEST_Z(s_ctx[num_connections]->cq = ibv_create_cq(s_ctx[num_connections]->ctx, 10, NULL, s_ctx[num_connections]->comp_channel, 0)); /* cqe=10 is arbitrary */
+  TEST_Z(s_ctx[num_connections]->cq = ibv_create_cq(s_ctx[num_connections]->ctx, 10 * num_mr, NULL, s_ctx[num_connections]->comp_channel, 0)); /* cqe=10 is arbitrary */
   TEST_NZ(ibv_req_notify_cq(s_ctx[num_connections]->cq, 0));
 
   int *i = malloc(sizeof(int)); // thread identifier
@@ -251,7 +251,7 @@ void * poll_cq(void *ctx)
   lm.samples = (double*)malloc(sizeof(double)*lm.size);
   
   int ret = 0;
-  int num_read_completed = 0;
+  int num_read_completed = num_mr;
 
   while (!ret) {
 
@@ -310,8 +310,8 @@ void build_qp_attr(struct ibv_qp_init_attr *qp_attr)
   qp_attr->recv_cq = s_ctx[num_connections]->cq;
   qp_attr->qp_type = IBV_QPT_RC;
 
-  qp_attr->cap.max_send_wr = 10;
-  qp_attr->cap.max_recv_wr = 10;
+  qp_attr->cap.max_send_wr = 10 * num_mr;
+  qp_attr->cap.max_recv_wr = 10 * num_mr;
   qp_attr->cap.max_send_sge = 1;
   qp_attr->cap.max_recv_sge = 1;
 }
@@ -343,39 +343,37 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
   else
   /* 2. else completion is a READ completion: start reading from remote memory region */
   {
-    printf("read completed\n");
+    conn->send_state = SS_RDMA_SENT;
+    // READ WR are processed in order, so when num_mr of them are completed 
+    // we can compute the latency
     if (++(*num_read_completed) == num_mr) 
     {
         double t_ns = record_time_elapsed(lm);
-        conn->send_state = SS_RDMA_SENT;
         printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", 
               i, get_peer_message_region(conn), t_ns);
-        *num_read_completed = 0;
+
+        pthread_mutex_lock(&lock_global_lm);
+        global_lm.num_finished++;
+        if (global_lm.num_finished == num_active_connections) {
+          // if all connections have finished reading, then we can print the global latency
+          double t_ns = record_time_elapsed(&global_lm);
+          printf("global latency: %f [ns]\n", t_ns);
+        }
+        pthread_mutex_unlock(&lock_global_lm);
     }
 
-    pthread_mutex_lock(&lock_global_lm);
-    global_lm.num_finished++;
-    if (global_lm.num_finished == num_active_connections) {
-      // if all connections have finished reading, then we can print the global latency
-      double t_ns = record_time_elapsed(&global_lm);
-      printf("global latency: %f [ns]\n", t_ns);
-    }
-    pthread_mutex_unlock(&lock_global_lm);
+    
   }
 
   // we are in a state where we are ready to send READ requests
-  if (conn->recv_state == RS_MR_RECV)
+  if (conn->recv_state == RS_MR_RECV && *num_read_completed == num_mr)
   {
     
     struct ibv_send_wr *wr, *prev_wr, *head_wr, *bad_wr = NULL;
     struct ibv_sge *sge;
 
-    printf("%d\n", num_mr);
-    // prepare num_mr READ requests
     for (int k=0; k < num_mr; k++) {
       
-      // create new WR
-      printf("Creating %d-th READ request\n", k);
       wr = malloc(sizeof(struct ibv_send_wr));
       sge = malloc(sizeof(struct ibv_sge));
       
@@ -393,18 +391,14 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
       sge->length = block_size;
       sge->lkey = conn->rdma_local_mr[k]->lkey;
 
-      // build linked list
-      if (k == 0) {
+      if (k==0) {
         head_wr = wr;
       } else {
         prev_wr->next = wr;
       }
-      
       prev_wr = wr;
-      
     }
     
-
     /* wait to be signaled before sending read request */
     pthread_mutex_lock(&lock[i]);
     while (read_remote[i] == 0) {
@@ -421,7 +415,9 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
     
     // send new READ
     clock_gettime(CLOCK_REALTIME, &(lm->start)); // start clock
-    TEST_NZ(ibv_post_send(conn->qp, head_wr, &bad_wr));    
+    printf("sending %d reads\n", num_mr);
+    TEST_NZ(ibv_post_send(conn->qp, head_wr, &bad_wr));
+    *num_read_completed = 0;
     
   } 
   return 0;
@@ -452,8 +448,8 @@ void register_memory(struct connection *conn)
   conn->send_msg = malloc(sizeof(struct message));
   conn->recv_msg = malloc(sizeof(struct message));
   
-  //conn->rdma_local_region = malloc(num_mr * sizeof(char*));
-  //conn->rdma_local_mr = malloc(num_mr * sizeof(struct ibv_mr*));
+  conn->rdma_local_region = malloc(num_mr * sizeof(char*));
+  conn->rdma_local_mr = malloc(num_mr * sizeof(struct ibv_mr*));
   
   TEST_Z(conn->send_mr = ibv_reg_mr(
     s_ctx[num_connections]->pd, 
@@ -467,17 +463,17 @@ void register_memory(struct connection *conn)
     sizeof(struct message), 
     IBV_ACCESS_LOCAL_WRITE));
 
-  // for (int i = 0; i < num_mr; i++) {
+  for (int i = 0; i < num_mr; i++) {
     
-  //   conn->rdma_local_region[i] = malloc(block_size);
-  //   conn->rdma_local_mr[i] = malloc(sizeof(struct ibv_mr));
+    conn->rdma_local_region[i] = malloc(block_size);
+    conn->rdma_local_mr[i] = malloc(sizeof(struct ibv_mr));
 
-  //   TEST_Z(conn->rdma_local_mr[i] = ibv_reg_mr(
-  //   s_ctx[num_connections]->pd, 
-  //   conn->rdma_local_region[i], 
-  //   block_size,
-  //   IBV_ACCESS_LOCAL_WRITE));
-  // }
+    TEST_Z(conn->rdma_local_mr[i] = ibv_reg_mr(
+      s_ctx[num_connections]->pd, 
+      conn->rdma_local_region[i], 
+      block_size,
+      IBV_ACCESS_LOCAL_WRITE));
+  }
 
 }
 
@@ -499,7 +495,6 @@ void destroy_connection(void *context)
   
   for (int i=0; i<num_mr; i++) {
     ibv_dereg_mr(conn->rdma_local_mr[i]);
-    free(conn->rdma_local_mr[i]);
     free(conn->rdma_local_region[i]);
   }
   
