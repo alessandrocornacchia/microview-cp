@@ -39,7 +39,8 @@ int on_disconnect(struct rdma_cm_id *id)
   printf("disconnected.\n");
 
   destroy_connection(id->context);
-  return 1; /* exit event loop */
+  /* exit event loop, we're the client here, the server will not disconnect instead */
+  return 1; 
 }
 
 int on_event(struct rdma_cm_event *event)

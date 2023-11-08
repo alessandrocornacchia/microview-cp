@@ -1,4 +1,5 @@
 #include "rdma-common.h"
+#include <signal.h>
 
 static int on_connect_request(struct rdma_cm_id *id);
 static int on_connection(struct rdma_cm_id *id);
@@ -12,6 +13,7 @@ static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
 static void register_memory(struct connection *conn);
 static void destroy_connection(void *context);
+static void INThandler(int sig);
 
 static uint16_t sampling_interval;
 static int num_active_connections = 0;
@@ -71,6 +73,8 @@ int main(int argc, char **argv)
 
   printf("listening on port %d.\n", port);
 
+  signal(SIGINT, INThandler); // handle CTRL+C
+
   while (rdma_get_cm_event(ec, &event) == 0) {
     struct rdma_cm_event event_copy;
 
@@ -87,12 +91,16 @@ int main(int argc, char **argv)
   return 0;
 }
 
+// INTHandler
+void INThandler(int sig)
+{
+  printf("CTRL+C detected, exiting...\n");
+  fflush(stdout);
+  exit(0);
+}
 
 void* tick(void *arg) {
   printf("Start reading process, read metrics every %d [sec]\n", sampling_interval);
-  
-  global_lm.size = 100;  // initial size
-  global_lm.samples = (double*)malloc(sizeof(double)*global_lm.size);
   
   /* synchronize container reads */
   while (1) {
@@ -198,10 +206,16 @@ struct connection* build_connection(struct rdma_cm_id *id)
   register_memory(conn);
   post_receives(conn);
 
-  // in the agent-nic there is no concurrency to create RDMA connections
-  // this is thread safe
+  // in the agent-nic there is no concurrency, all events are processed
+  // one by one including connection creation / destroy 
   num_connections++;
   num_active_connections++;
+  
+  /* initialize latency meter if first active connection */
+  if (num_active_connections == 1) {
+    global_lm.size = 100;  // initial size
+    global_lm.samples = (double*)malloc(sizeof(double)*global_lm.size);
+  }
   
   return conn;
 
@@ -268,37 +282,35 @@ void * poll_cq(void *ctx)
 
   }
 
-  /* check if thread is scheduled for termination */
-    
-    printf("Termination of poll_cq thread %d\n", i);
-    
-    // write latency samples referring to one pod
-    char filename[100];
-    sprintf(filename, "latency_samples_%d.txt", i);
-    FILE *f = fopen(filename, "w");
-    for (int j=0; j < lm.num_samples; j++)
+  /* when we exit the loop means pod has to terminate, record stats and die*/
+  printf("Termination of poll_cq thread %d\n", i);
+  char filename[100];
+  sprintf(filename, "latency_samples_%d.txt", i);
+  FILE *f = fopen(filename, "w");
+  for (int j=0; j < lm.num_samples; j++)
+  {
+    fprintf(f, "%f\n", lm.samples[j]);
+  }
+  fclose(f);
+  free(lm.samples);
+
+  pthread_mutex_lock(&lock_global_lm);
+  // ugly trick: one thread only writes to file
+  // TODO should add a lock also for this variable if we use it in a poll thread other 
+  // than main thread
+  if (num_active_connections == 1) {  
+    sprintf(filename, "read_completion_latency.txt");
+    f = fopen(filename, "w");
+    for (int j=0; j < global_lm.num_samples; j++)
     {
-      fprintf(f, "%f\n", lm.samples[j]);
+      fprintf(f, "%f\n", global_lm.samples[j]);
     }
     fclose(f);
-    free(lm.samples);
-
-    // write latency samples for completion of all pods to file
-    pthread_mutex_lock(&lock_global_lm);
-    // one thread only writes to file
-    if (global_lm.num_finished >= 0) {
-      global_lm.num_finished = INT_LEAST32_MIN;
-      sprintf(filename, "read_completion_latency.txt");
-      f = fopen(filename, "w");
-      for (int j=0; j < global_lm.num_samples; j++)
-      {
-        fprintf(f, "%f\n", global_lm.samples[j]);
-      }
-      fclose(f);
-      free(global_lm.samples);
-    }
-    pthread_mutex_unlock(&lock_global_lm);
-    pthread_exit(NULL);
+    free(global_lm.samples);
+  }
+  num_active_connections--;
+  pthread_mutex_unlock(&lock_global_lm);
+  pthread_exit(NULL);
 }
 
 
@@ -341,21 +353,20 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
     }
   }
   else
-  /* 2. else completion is a READ completion: start reading from remote memory region */
+  /* 2. else completion is a READ completion: read from remote memory region */
   {
     conn->send_state = SS_RDMA_SENT;
-    // READ WR are processed in order, so when num_mr of them are completed 
-    // we can compute the latency
+    // READ WR are processed in order, we wait for all of them to complete before computing latency
     if (++(*num_read_completed) == num_mr) 
     {
         double t_ns = record_time_elapsed(lm);
         printf("READ remote buffer pod-%d: %s, latency: %f [ns]\n", 
               i, get_peer_message_region(conn), t_ns);
 
+        /* following timer computes latency when all connections have finished */
         pthread_mutex_lock(&lock_global_lm);
         global_lm.num_finished++;
         if (global_lm.num_finished == num_active_connections) {
-          // if all connections have finished reading, then we can print the global latency
           double t_ns = record_time_elapsed(&global_lm);
           printf("global latency: %f [ns]\n", t_ns);
         }
@@ -365,7 +376,7 @@ int on_completion(struct ibv_wc *wc, int i, struct latency_meter* lm, int* num_r
     
   }
 
-  // we are in a state where we are ready to send READ requests
+  // if all outstanding READ requests have completed, then we can send a new batch of READ
   if (conn->recv_state == RS_MR_RECV && *num_read_completed == num_mr)
   {
     
@@ -506,6 +517,6 @@ void destroy_connection(void *context)
   rdma_destroy_id(conn->id);
 
   free(conn);
-  num_active_connections--;
+  //num_active_connections--;
   printf("connection destroyed\n");
 }
