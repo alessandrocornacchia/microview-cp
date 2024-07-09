@@ -1,8 +1,14 @@
 MicroView Control Plane
 ======================
 
-Implementation of SmartNIC to host communication via RDMA for microservices metrics
+An implementation SmartNIC-to-host communication via RDMA for microservices metrics.
 
+The description of the project can be found in our published research paper:
+
+[MicroView: Cloud-Native Observability with Temporal Precision](https://dl.acm.org/doi/10.1145/3630202.3630233), ACM CONeXT-SW '23  
+*Alessandro Cornacchia, Theophilus A. Benson, Muhammad Bilal, and Marco Canini*
+
+## Run instructions
 Start agent on localhost running:
 ```
 make
@@ -22,18 +28,3 @@ The container should:
 On the other hand, MicroView agent:
 1. allocates shared memory region and closes TCP connection
 2. sends RDMA `R_key` to the microview agent counter part which sits on the SmartNIC
-
-## TODO list
-- Measure latency and throughput on the following scenarios:
-    1. many MR registered on same connection, to read metrics agent should access all of them
-    2. single RDMA read of a vector
-
-- Define page size e.g., 4KB (~ 2000 metrics), number of containers (this will determine number of memory regions)
- (actual content is not important...).
-
-DOUBTS:
- - Does RDMA work completion for READ means that READ has been issued or that we alredy have data available? 
- - are RDMA read processed in order, ok, means next read is sent when previous read has rx data or pipelined? 
- - throughput degradation is function of number of connections (reading paper), what if same connections + scattered memory regions? Expect same performance as single connection.
- - investigate what happens when do not create a new context but reuse the same over all connections... you basicaly map the same completion queue/WQ to 
-  different connections so they both rx read request and respond ??? is message sent to queue pair or to all queue pairs on the destination host??
