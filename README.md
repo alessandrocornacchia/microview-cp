@@ -8,6 +8,11 @@ The description of the project can be found in our published research paper:
 [MicroView: Cloud-Native Observability with Temporal Precision](https://dl.acm.org/doi/10.1145/3630202.3630233), ACM CONeXT-SW '23  
 *Alessandro Cornacchia, Theophilus A. Benson, Muhammad Bilal, and Marco Canini*
 
+<div align="center">
+<img src="./uview-microservices.png" alt="drawing" width="500"/>
+</div>
+<p></p>
+
 ## Run instructions
 Start agent on localhost running:
 ```
