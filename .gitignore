@@ -2,3 +2,4 @@
 .port
 obj/**
 bin/**
+.conda**
