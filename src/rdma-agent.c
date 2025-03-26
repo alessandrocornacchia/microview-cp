@@ -233,7 +233,11 @@ int on_completion(struct ibv_wc *wc)
 
 }
 
-
+/**
+ * Map shared memory region to RDMA memory region.
+ * It assign the pointer in the rdma connection data structure to the shared memory region
+ * pointer.
+ */
 void register_memory(struct connection *conn, void* mr)
 {
   /* the agent side uses shared memory region to be mapped as 

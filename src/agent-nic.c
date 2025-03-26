@@ -33,6 +33,11 @@ int terminate[RDMA_MAX_CONNECTIONS] = {0}; // stop polling cqs
 pthread_mutex_t lock[RDMA_MAX_CONNECTIONS];
 pthread_cond_t cond_poll_agent[RDMA_MAX_CONNECTIONS];
 
+
+/**
+ * Main function
+ * usage: ./agent-nic <port> <sampling interval [sec]> <block size> <num blocks>
+ */
 int main(int argc, char **argv)
 {
   struct sockaddr_in6 addr;
@@ -91,7 +96,12 @@ int main(int argc, char **argv)
   return 0;
 }
 
-// INTHandler
+
+
+
+/**
+ * Handle CTRL+C signal
+ */
 void INThandler(int sig)
 {
   printf("CTRL+C detected, exiting...\n");
@@ -99,6 +109,10 @@ void INThandler(int sig)
   exit(0);
 }
 
+
+/**
+ * Periodic thread to synchronize container reads at every sampling_interval
+ */
 void* tick(void *arg) {
   printf("Start reading process, read metrics every %d [sec]\n", sampling_interval);
   
@@ -294,8 +308,8 @@ void * poll_cq(void *ctx)
   fclose(f);
   free(lm.samples);
 
+  /* is last active thread write global latency, otherwise just decrease and quit */
   pthread_mutex_lock(&lock_global_lm);
-  // ugly trick: one thread only writes to file
   // TODO should add a lock also for this variable if we use it in a poll thread other 
   // than main thread
   if (num_active_connections == 1) {  
@@ -454,7 +468,8 @@ double record_time_elapsed(struct latency_meter *lm)
 void register_memory(struct connection *conn)
 {
   /* NIC side only allocates buffers for send/recv operations and rdma_local_mr
-    where to write READ output
+    where to write READ output. It will not allocate the rdma_remote_mr, which is instead
+    done in rdma-agent.c only. 
   */
   conn->send_msg = malloc(sizeof(struct message));
   conn->recv_msg = malloc(sizeof(struct message));

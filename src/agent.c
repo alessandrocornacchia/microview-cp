@@ -43,6 +43,15 @@ struct control_plane {
 struct control_plane cp;
 
 
+/**
+ * Kick-off RDMA session with a new pod.
+ * 
+ * Note that a pointer to the allocated shared memory is passed as context to the connection.
+ * When the RDMA library will call the on_route_resolved function, the connection will be built
+ * and the shared memory pointer will be used to register the memory region.
+ * 
+ * See on_route_resolved and on_connection functions in rdma-agent.c
+ */
 int start_rdma_session(int shm_fd, int podID) {
     struct addrinfo *addr;
     struct rdma_cm_event *event = NULL;
@@ -251,6 +260,11 @@ int run() {
 }
 
 
+/**
+ * Run MicroView agent
+ * usage: ./agent <DPU-address> <DPU-port> <block size> <num blocks>
+ * 
+ */
 int main(int argc, char *argv[])
 {
     if (argc != 5) {
