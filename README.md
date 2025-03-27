@@ -74,3 +74,10 @@ CA 'mlx5_0'
                 Link layer: Ethernet
 ..
 ```
+
+### Netdev name to ibdev name
+```
+(uview) cornaca@mcnode28:[microview-cp]$ ibdev2netdev | grep ens1f1
+mlx5_1 port 1 ==> ens1f1 (Up)
+```
+

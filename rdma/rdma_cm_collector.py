@@ -148,11 +148,11 @@ class RDMACollectorCm:
             # Post RDMA READ work requests for all regions
             for idx, region in enumerate(self.remote_regions):
                 self.cmid.post_read(
-                    region['buffer'], 
-                    region['length'], 
-                    region['mr'].lkey,
-                    remote_addr=region['remote_addr'], 
-                    rkey=region['rkey']
+                    region.buffer, 
+                    region.length, 
+                    region.mr.lkey,
+                    remote_addr=region.remote_addr, 
+                    rkey=region.rkey
                 )
                 
                 # Wait for completion
@@ -161,8 +161,8 @@ class RDMACollectorCm:
                     raise RuntimeError(f"RDMA READ failed for region {idx} with status: {wc.status}")
                 
                 # Store the result
-                key = region['name'] if region['name'] is not None else idx
-                results[key] = region['buffer']
+                key = region.name if region.name is not None else idx
+                results[key] = region.buffer
             
             return results
             
