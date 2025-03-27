@@ -6,11 +6,41 @@ import pyverbs.enums as e
 
 PAGE_SIZE = 4096
 
+
+class MRMetadata:
+    """
+    Represents a remote memory region that can be accessed via RDMA READ.
+    Contains all necessary information for performing RDMA operations.
+    """
+    def __init__(self, remote_addr: int, rkey: int, length: int, buffer: bytearray, mr, name: str = None):
+        """
+        Initialize a remote memory region.
+        
+        Args:
+            remote_addr: Remote memory address to read from
+            rkey: Remote key for the memory region
+            length: Length of the memory region to read
+            buffer: Local buffer to store read data
+            mr: Memory registration for the local buffer
+            name: Optional name identifier for this region
+        """
+        self.remote_addr = remote_addr
+        self.rkey = rkey
+        self.length = length
+        self.buffer = buffer
+        self.mr = mr
+        self.name = name
+
+
+
+
 class RDMACollectorCm:
     """
-    Collector that uses RDMA CM to read metrics from host memory.
+    Collector that uses RDMA CM to read metrics from remote host memory.
     Uses a single Queue Pair in Reliable Connection (RC) mode.
     Memory regions (MR) to read from, and corresponding Rkeys, are provided by the external control plane.
+    For performacnce optimizations, the MR size by default is set to page size (4096 bytes).
+    TODO: Control plane here should be responsible of providing the remote memory regions to read from, possibly being continguous in memory in the remote host.
     """
     def __init__(self, host_addr: str, port: str = "18515"):
         """
@@ -28,11 +58,13 @@ class RDMACollectorCm:
         self.connected = False
         
         # Storage for remote memory regions
-        self.remote_regions = []
+        self.remote_regions: list[MRMetadata] = []
         
         # Initialize RDMA connection
         self._init_rdma_connection()
     
+    
+
     def register_remote_read_region(self, remote_addr: int, rkey: int, length: int = PAGE_SIZE, name: str = None):
         """
         Register a remote memory region for RDMA reads.
@@ -54,14 +86,14 @@ class RDMACollectorCm:
         buffer = bytearray(length)
         mr = self.cmid.reg_msgs(buffer)
         
-        region = {
-            'remote_addr': remote_addr,
-            'rkey': rkey,
-            'length': length,
-            'buffer': buffer,
-            'mr': mr,
-            'name': name
-        }
+        region = MRMetadata(
+            remote_addr=remote_addr,
+            rkey=rkey,
+            length=length,
+            buffer=buffer,
+            mr=mr,
+            name=name
+        )
         
         self.remote_regions.append(region)
         return len(self.remote_regions) - 1  # Return index of the registered region
