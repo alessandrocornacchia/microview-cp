@@ -106,6 +106,10 @@ struct connection* build_connection(struct rdma_cm_id *id)
   // we use the context to pass memory region to map
   void *local_mr = id->context;
   
+  // here is where connection data structure, is attached to rdma_cm_id context pointer
+  // following events and operations will always have this pointer as context. 
+  // It is up to the programmer to use it as a pointer to the connection data structure and 
+  // add relevant information to it, such as queue pairs etc.
   id->context = conn = (struct connection *)malloc(sizeof(struct connection));
 
   conn->id = id;

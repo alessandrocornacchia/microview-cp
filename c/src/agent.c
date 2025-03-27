@@ -122,6 +122,7 @@ void * poll_pids(void* args) {
     }
 }
 
+
 // Function to handle client requests
 void *handleNewPod(void *clientSocketPtr) {
     int clientSocket = *((int *)clientSocketPtr);
@@ -167,6 +168,9 @@ void *handleNewPod(void *clientSocketPtr) {
     printf("RDMA connection for pid %d terminated\n", podID);
     pthread_exit(NULL);
 }
+
+
+
 
 int run() {
     /* opens TCP server and listens for incoming conenction
