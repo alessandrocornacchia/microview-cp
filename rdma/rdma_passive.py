@@ -16,7 +16,7 @@ from pyverbs.pd import PD
 from pyverbs.mr import MR
 from pyverbs.cq import CQ
 import pyverbs.cm_enums as ce
-import pyverbs.enums as e
+import pyverbs.enums
 
 
 # Default values
@@ -102,33 +102,23 @@ class RDMAPassiveServer:
         # Optionally fill with some initial data
         initial_data = b"RDMA-TEST"
         self.buffer[:len(initial_data)] = np.frombuffer(initial_data, dtype=np.uint8)
-
-        # Get a context for the first available device
-        # devices = Context.get_devices()
-        # if not devices:
-        #     raise RuntimeError("No RDMA devices found")
-        context = Context(name='mlx5_1')
-
-        # Create protection domain directly
-        self.pd = PD(context)
-
-        print(f"Created protection domain: {self.pd}")
         
-        # Register the MR with remote read access
+        # Keep these objects as instance variables
+        self.ctx = Context(name='mlx5_1')
+        self.pd = PD(self.ctx)
+
+        # Register the MR with remote read access (if address is not provideed, it will be allocated)
         buffer_addr = self.buffer.ctypes.data  # Get raw address
         buffer_length = self.buffer_size       # Use explicit size
-        access_flags = e.IBV_ACCESS_LOCAL_WRITE | e.IBV_ACCESS_REMOTE_READ
+        access_flags = pyverbs.enums.IBV_ACCESS_LOCAL_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ
 
-        self.mr = MR(self.pd,buffer_length, access_flags, buffer_addr)
+        self.mr = MR(self.pd, buffer_length, access_flags, buffer_addr)
         
-        # Register the MR with remote read access
-        # self.mr = MR(self.pd, self.buffer, e.IBV_ACCESS_LOCAL_WRITE | e.IBV_ACCESS_REMOTE_READ)
-
-        print(f"Memory region created: addr={hex(self.mr.buf)}, rkey={self.mr.rkey}, size={self.buffer_size}")
+        print(f"Memory region created: mr_addr={hex(self.mr.buf)}, buffer_addr={hex(self.buffer.ctypes.data)}, rkey={self.mr.rkey}, size={self.buffer_size}")
 
         # Save MR info
         self.mr_info = {
-            "addr": self.mr.buf,
+            "addr": self.buffer.ctypes.data, #self.mr.buf,
             "rkey": self.mr.rkey,
             "size": self.buffer_size
         }
@@ -177,7 +167,7 @@ class RDMAPassiveServer:
             
             # Create QP capabilities
             cap = QPCap(max_send_wr=10, max_recv_wr=10, max_send_sge=1, max_recv_sge=1)
-            qp_init_attr = QPInitAttr(cap=cap, qp_type=e.IBV_QPT_RC)
+            qp_init_attr = QPInitAttr(cap=cap, qp_type=pyverbs.enums.IBV_QPT_RC)
             
             # Create QP for this connection
             cmid.create_qp(qp_init_attr)
@@ -187,14 +177,26 @@ class RDMAPassiveServer:
             
             print("Connection request accepted")
             
-            # Update the CMID to keep the connection alive
+            # Update the CMID with the cmid of the connected client (similar to TCP socket programming)
             self.cmid = cmid
             
-            # Start updating the buffer in a thread
-            # self.start_buffer_updates()
-            
-            # Wait for disconnection
-            cmid.event_handler(timeout_ms=1000)  # Wait for events with timeout
+            while self.running:
+                try:
+                    # You could poll connection state or try a zero-length receive
+                    # This is a simple way to keep the connection alive
+                    time.sleep(1)
+                    
+                    # Optional: Check if connection is still valid
+                    # If you want to detect disconnection, you could try:
+                    status = cmid.query() 
+                    # if status shows disconnected, break
+                    if status == pyverbs.enums.IBV_CM_ESTABLISHED:
+                        print("Connection still alive")
+                    else:
+                        break
+                except Exception:
+                    print("Connection appears to be closed")
+                    break
             
             print("Client disconnected")
             

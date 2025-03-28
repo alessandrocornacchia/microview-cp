@@ -3,3 +3,6 @@
 obj/**
 bin/**
 .conda**
+*.pickle
+__pycache__/**
+*.pyc

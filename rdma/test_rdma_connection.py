@@ -40,6 +40,8 @@ def main():
         print(f"Connecting to RDMA server at {args.host}:{args.port}")
         collector = RDMACollectorCm(host_addr=args.host, port=args.port)
         
+        print(f"Adding memory region to the collector")
+
         # Register the remote memory region
         region_idx = collector.register_remote_read_region(
             remote_addr=mr_info['addr'],
@@ -70,14 +72,6 @@ def main():
                 # Check for our test pattern
                 if b"RDMA-TEST-DATA" in data[:64]:
                     print("  Found test pattern 'RDMA-TEST-DATA'")
-                
-                # Look for timestamp (which changes)
-                if b"Timestamp:" in data:
-                    timestamp_pos = data.find(b"Timestamp:")
-                    timestamp_end = data.find(b"\x00", timestamp_pos)
-                    if timestamp_end > timestamp_pos:
-                        timestamp = data[timestamp_pos:timestamp_end].decode()
-                        print(f"  {timestamp}")
             
             # Wait before the next read
             if i < 2:  # Don't sleep after the last read
