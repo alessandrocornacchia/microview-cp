@@ -68,20 +68,17 @@ class RDMAPassiveServer:
                 flags=ce.RAI_PASSIVE
             )
             
+            # Create QP capabilities
+            cap = QPCap(max_send_wr=10, max_recv_wr=10, max_send_sge=1, max_recv_sge=1)
+            qp_init_attr = QPInitAttr(cap=cap, qp_type=pyverbs.enums.IBV_QPT_RC)
+
             # Create passive CMID for listening
-            self.listener_id = CMID(creator=addr_info)  # Create without event channel
-            
-            # Create buffer and register memory region
-            self.init_memory_region()
+            self.listener_id = CMID(creator=addr_info, qp_init_attr=qp_init_attr)  # Create without event channel
             
             # Listen for connections
-            self.listener_id.listen(10)  # Backlog of 10
+            self.listener_id.listen()
             
             print(f"RDMA passive server listening on port {self.port}")
-            print(f"Memory region: addr={hex(self.mr.buf)}, rkey={self.mr.rkey}, size={self.buffer_size}")
-            
-            # Save MR info to pickle file
-            self.save_mr_info()
             
             # Start event loop
             self.running = True
@@ -92,7 +89,7 @@ class RDMAPassiveServer:
             self.cleanup()
             raise
             
-    def init_memory_region(self):
+    def init_memory_region(self, pd=None):
         """
         Initialize and register a memory region for RDMA operations.
         """
@@ -103,16 +100,22 @@ class RDMAPassiveServer:
         initial_data = b"RDMA-TEST"
         self.buffer[:len(initial_data)] = np.frombuffer(initial_data, dtype=np.uint8)
         
-        # Keep these objects as instance variables
-        self.ctx = Context(name='mlx5_1')
-        self.pd = PD(self.ctx)
+        # if pd is None:
+        #     print('Creating new protection domain for MR')
+        #     # Only create context and pd if not provided
+        #     self.ctx = Context(name='mlx5_1')
+        #     self.pd = PD(self.ctx)
+        # else:
+        #     # Use the provided pd
+        #     self.pd = pd
 
         # Register the MR with remote read access (if address is not provideed, it will be allocated)
         buffer_addr = self.buffer.ctypes.data  # Get raw address
         buffer_length = self.buffer_size       # Use explicit size
         access_flags = pyverbs.enums.IBV_ACCESS_LOCAL_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ
 
-        self.mr = MR(self.pd, buffer_length, access_flags, buffer_addr)
+        print(pd)
+        self.mr = MR(pd, buffer_length, access_flags, buffer_addr)
         
         print(f"Memory region created: mr_addr={hex(self.mr.buf)}, buffer_addr={hex(self.buffer.ctypes.data)}, rkey={self.mr.rkey}, size={self.buffer_size}")
 
@@ -165,15 +168,19 @@ class RDMAPassiveServer:
         try:
             print("Received connection request")
             
-            # Create QP capabilities
-            cap = QPCap(max_send_wr=10, max_recv_wr=10, max_send_sge=1, max_recv_sge=1)
-            qp_init_attr = QPInitAttr(cap=cap, qp_type=pyverbs.enums.IBV_QPT_RC)
-            
             # Create QP for this connection
-            cmid.create_qp(qp_init_attr)
+            # cmid.create_qp(qp_init_attr)
             
             # Accept the connection
-            cmid.accept(None)
+            cmid.accept()
+            
+            # Create buffer and register memory region
+            self.init_memory_region(cmid.pd)
+            print(f"Memory region: addr={hex(self.mr.buf)}, rkey={self.mr.rkey}, size={self.buffer_size}")
+            
+            # Save MR info to pickle file
+            self.save_mr_info()
+            
             
             print("Connection request accepted")
             
@@ -184,7 +191,7 @@ class RDMAPassiveServer:
                 try:
                     # You could poll connection state or try a zero-length receive
                     # This is a simple way to keep the connection alive
-                    time.sleep(1)
+                    time.sleep(10)
                     
                     # Optional: Check if connection is still valid
                     # If you want to detect disconnection, you could try:

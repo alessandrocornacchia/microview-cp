@@ -34,6 +34,29 @@ On the other hand, MicroView agent:
 1. allocates shared memory region and closes TCP connection
 2. sends RDMA `R_key` to the microview agent counter part which sits on the SmartNIC
 
+## Python prototype run instructions
+
+### Test RDMA READ Pyverb
+First test a simple client/server Pyverbs example:
+```
+python rdma/rdma_server.py
+```
+On another terminal:
+```
+python rdma/rdma_client.py --host 10.200.0.28 --port 7471
+```
+
+### Test RDMA Collector class
+
+```
+python rdma/rdma_passive.py
+```
+
+Then start test reading metrics:
+
+```
+python rdma/test_rdma_connection.py --host 10.200.0.28 --port 18515
+```
 
 ## TODO list
 - Measure latency and throughput on the following scenarios:

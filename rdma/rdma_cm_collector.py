@@ -148,14 +148,14 @@ class RDMACollectorCm:
         results = {}
         
         try:
-            # Post RDMA READ work requests for all regions
+            # Post RDMA READ work requests for all registered regions
             for idx, region in enumerate(self.remote_regions):
                 print(f"Reading region {idx} of size {region.mr.length} from remote address {hex(region.remote_addr)} and rkey {region.rkey}")
                 self.cmid.post_read(
                     region.mr, 
                     region.length,
-                    region.remote_addr, 
-                    region.rkey
+                    int(region.remote_addr), 
+                    int(region.rkey)
                 )
                 
                 # Wait for completion
@@ -165,7 +165,7 @@ class RDMACollectorCm:
                 
                 # Store the result
                 key = region.name if region.name is not None else idx
-                results[key] = region.buffer
+                results[key] = region.mr.read(region.length, 0) # read the buffer, length and offset
             
             return results
             

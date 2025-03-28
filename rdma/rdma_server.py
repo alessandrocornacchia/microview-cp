@@ -37,7 +37,6 @@ sid.listen()  # listen for incoming connection requests
 new_id = sid.get_request()  # check if there are any connection requests
 new_id.accept()  # new_id is connected to remote peer and ready to communicate
 
-import pyverbs.mem_alloc as mem
 
 # Register the memory region for RDMA operations with !KB buffer
 mr = MR(new_id.pd, 1000, e.IBV_ACCESS_LOCAL_WRITE | 

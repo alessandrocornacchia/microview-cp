@@ -24,23 +24,26 @@ def main():
     
     args = parser.parse_args()
     
-    # Load memory region information from pickle file
-    try:
-        print(f"Loading memory region info from {args.pickle_file}")
-        with open(args.pickle_file, "rb") as f:
-            mr_info = pickle.load(f)
-            
-        print(f"Memory region: addr={hex(mr_info['addr'])}, rkey={mr_info['rkey']}, size={mr_info['size']}")
-    except Exception as e:
-        print(f"Error loading memory region info: {e}")
-        return
-    
     # Create RDMACollectorCm instance
     try:
         print(f"Connecting to RDMA server at {args.host}:{args.port}")
         collector = RDMACollectorCm(host_addr=args.host, port=args.port)
         
+
+        time.sleep(2)
+
         print(f"Adding memory region to the collector")
+
+        # Load memory region information from pickle file
+        try:
+            print(f"Loading memory region info from {args.pickle_file}")
+            with open(args.pickle_file, "rb") as f:
+                mr_info = pickle.load(f)
+                
+            print(f"Memory region: addr={hex(mr_info['addr'])}, rkey={mr_info['rkey']}, size={mr_info['size']}")
+        except Exception as e:
+            print(f"Error loading memory region info: {e}")
+            return
 
         # Register the remote memory region
         region_idx = collector.register_remote_read_region(
