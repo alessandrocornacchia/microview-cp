@@ -5,7 +5,7 @@ from pyverbs.mr import MR
 from pyverbs.cq import CQ, CqInitAttrEx
 import pyverbs.cm_enums as ce
 import pyverbs.enums as e
-
+from pyverbs.pd import PD
 
 # # Print available enums in pyverbs.enums for RDMA constants 
 

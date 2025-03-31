@@ -18,6 +18,7 @@ from pyverbs.cq import CQ
 import pyverbs.cm_enums as ce
 import pyverbs.enums
 
+import threading
 
 # Default values
 DEFAULT_PORT = "18515"
@@ -126,6 +127,7 @@ class RDMAPassiveServer:
             "size": self.buffer_size
         }
         
+    
     def save_mr_info(self):
         """
         Save memory region information to a pickle file.
@@ -134,7 +136,8 @@ class RDMAPassiveServer:
             pickle.dump(self.mr_info, f)
             
         print(f"Memory region info saved to {PICKLE_FILE}")
-            
+
+
     def event_loop(self):
         """
         Main event loop for processing CM events.
@@ -147,6 +150,12 @@ class RDMAPassiveServer:
                 # Instead, we use a blocking approach to wait for connection
                 cmid = self.listener_id.get_request()
                 if cmid:
+
+                    # TODO Start new thread for this connection
+                    # thread = threading.Thread(target=connection_handler, args=(new_cmid,))
+                    # thread.daemon = True
+                    # thread.start()
+
                     self.handle_connect_request(cmid)
                 
             except KeyboardInterrupt:
@@ -210,24 +219,6 @@ class RDMAPassiveServer:
         except Exception as e:
             print(f"Error handling connect request: {e}")
 
-    def start_buffer_updates(self):
-        """
-        Start a thread to periodically update the buffer.
-        """
-        def update_buffer():
-            while self.running:
-                # Update a timestamp in the buffer
-                timestamp = f"Timestamp: {time.time()}"
-                timestamp_bytes = timestamp.encode()
-                pos = 64  # Offset in the buffer
-                self.buffer[pos:pos+len(timestamp_bytes)] = timestamp_bytes
-                time.sleep(1)
-                
-        # Start a thread to update the buffer
-        import threading
-        self.update_thread = threading.Thread(target=update_buffer)
-        self.update_thread.daemon = True
-        self.update_thread.start()
         
     def cleanup(self):
         """
