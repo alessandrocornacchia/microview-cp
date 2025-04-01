@@ -59,7 +59,9 @@ python rdma/test_rdma_connection.py --host 10.200.0.28 --port 18515
 ```
 
 ## TODO list
-- Shared memory should be one large block, where RDMA memory regions are 4KB size and contiguous
+- Shared memory should be one large block, where RDMA memory regions are 4KB size and contiguous (done)
+- How to handle close(). MicroView client should probably close nothing: shared memmory is managed by the uView agent
+and deleting metrics make little sense (when pod disappear, it's page will just be released entirely)
 
 
 ## RDMA in Linux: primer

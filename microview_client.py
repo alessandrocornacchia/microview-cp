@@ -3,13 +3,40 @@ import requests
 from multiprocessing import shared_memory
 from typing import Dict, Optional, Union, Any
 from metrics import metric_dtype
+import ctypes 
+import logging
+from utils import open_untracked_shared_memory, get_value_ptr_in_shm
+
+# >>>>>> PATCH not to let multiprocessing clean up shared memory
+# This is a workaround to prevent the multiprocessing library from cleaning up shared memory
+import multiprocessing.resource_tracker
+original_register = multiprocessing.resource_tracker.register
+def patched_register(name, rtype):
+    if rtype == "shared_memory":
+        # Ignore shared memory registrations
+        return
+    return original_register(name, rtype)
+multiprocessing.resource_tracker.register = patched_register
+# <<<<<< PATCH
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('microview_client.log')
+    ]
+)
+logger = logging.getLogger('MicroViewClient')
 
 class MicroViewMetric:
     """
     A class representing a single metric in the MicroView system.
     Abstracts away the details of shared memory access.
     """
-    def __init__(self, shm_name: str, index: int, metric_name: str, metric_type: bool):
+    def __init__(self, value_ptr: int, metric_name: str, metric_type: bool):
         """
         Initialize a MicroViewMetric.
         
@@ -19,29 +46,11 @@ class MicroViewMetric:
             metric_name: Name of the metric
             metric_type: Type of metric (False=counter, True=gauge)
         """
-        self.shm_name = shm_name
-        self.index = index
+        self.value_ptr = ctypes.cast(value_ptr, ctypes.POINTER(ctypes.c_double))
         self.metric_name = metric_name
         self.metric_type = metric_type
         
-        # Open the shared memory
-        self.shm = shared_memory.SharedMemory(name=shm_name)
-        
-        # Create a numpy array view of the shared memory
-        # TODO: perhaps this can be avoided by having access to the raw pointer....
-        # this is a bit of an overkill, in this client we don't want to know this
-        self.array = np.ndarray((self._calculate_array_size(),), dtype=metric_dtype, buffer=self.shm.buf)
-        
-        # Validate that we're accessing the right metric
-        stored_name = self.array[index]['name'].tobytes().decode('utf-8').rstrip('\x00')
-        if stored_name != metric_name:
-            self.shm.close()
-            raise ValueError(f"Metric name mismatch: expected '{metric_name}', found '{stored_name}'")
 
-    def _calculate_array_size(self) -> int:
-        """Calculate the number of metrics that can fit in a page"""
-        return 4096 // np.dtype(metric_dtype).itemsize
-        
     def update_value(self, value: float) -> None:
         """
         Update the value of this metric in shared memory.
@@ -49,7 +58,9 @@ class MicroViewMetric:
         Args:
             value: New value to set
         """
-        self.array[self.index]['value'] = value
+        # self.array[self.index]['value'] = value
+        # Update the value
+        self.value_ptr[0] = value
         
     def get_value(self) -> float:
         """
@@ -58,14 +69,15 @@ class MicroViewMetric:
         Returns:
             The current value of the metric
         """
-        return float(self.array[self.index]['value'])
+        # return float(self.array[self.index]['value'])
+        return self.value_ptr[0]
     
-    def close(self) -> None:
-        """
-        Close the shared memory access.
-        """
-        if hasattr(self, 'shm') and self.shm:
-            self.shm.close()
+    # def close(self) -> None:
+    #     """
+    #     Close the shared memory access.
+    #     """
+    #     if hasattr(self, 'shm') and self.shm:
+    #         self.shm.close()
 
 
 
@@ -86,7 +98,9 @@ class MicroViewClient:
         self.microservice_id = microservice_id
         self.base_url = f"http://{host}:{port}"
         self.metrics = {}  # Store created metrics for reference
+        self.shm = None  # Shared memory object, which will be populated at runtime
         
+
     def create_metric(self, name: str, metric_type: bool = False, initial_value: float = 0.0) -> MicroViewMetric:
         """
         Create a new metric in the MicroView system.
@@ -118,18 +132,26 @@ class MicroViewClient:
             
             # Parse the response
             result = response.json()
+            shm_name = result["shm_name"]
+            value_ptr_offset = int(result["addr"])  # Pointer to the value field
             
+            # Get access to the shared memory object
+            if not self.shm:
+                # self.shm = open_untracked_shared_memory(shm_name)
+                self.shm = shared_memory.SharedMemory(name=shm_name)
+            value_ptr = get_value_ptr_in_shm(self.shm, value_ptr_offset)
+
             # Create a MicroViewMetric object
             metric = MicroViewMetric(
-                shm_name=result["shm_name"],
-                index=result["index"],
+                value_ptr=value_ptr,
                 metric_name=name,
                 metric_type=metric_type
             )
             
             # Store the metric for reference
             self.metrics[name] = metric
-            
+            logger.info(f"Created metric '{name}' with type {metric_type} and initial value {initial_value}")
+
             return metric
             
         except requests.RequestException as e:
@@ -172,13 +194,18 @@ class MicroViewClient:
             print(f"Failed to delete metric: {e}")
             return False
             
+            
     def close(self) -> None:
         """
         Close all shared memory resources.
         """
-        for metric in self.metrics.values():
-            metric.close()
-        self.metrics.clear()
+        # for metric in self.metrics.values():
+        #     metric.close()
+        # self.metrics.clear()
+        if self.shm:
+            self.shm.close()
+            self.shm = None
+            logger.info("Closed shared memory resources")
         
     def __del__(self):
         """
@@ -189,6 +216,18 @@ class MicroViewClient:
 
 # Example usage
 if __name__ == "__main__":
+    
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MicroView Client Example")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
+    args = parser.parse_args()
+
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
+
     # Create a MicroView client
     client = MicroViewClient("example-service")
     
@@ -204,7 +243,7 @@ if __name__ == "__main__":
             requests_metric.update_value(i)
             latency_metric.update_value(i * 0.1)
             
-            print(f"Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
+            logger.info(f"Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
             
             import time
             time.sleep(10)
