@@ -165,7 +165,7 @@ class MicroViewClient:
         self.close()
 
 
-# Example usage
+# Example usage: create two metrics with MicroView API and update their value 10 times
 if __name__ == "__main__":
     
     import argparse

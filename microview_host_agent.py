@@ -157,6 +157,7 @@ class MicroviewHostAgent:
                     return jsonify({"error": f"Missing required field: {field}"}), 400
 
             try:
+            
                 metric_type = bool(data['type'])
                 microservice_name = data['microservice_id'] + f"-{int(time.time())}"
                 addr_offset = self.mem_mgmt.allocate_metric(
@@ -166,13 +167,8 @@ class MicroviewHostAgent:
                     float(data['value'])
                 )
                 logger.info(f"Created metric '{data['name']}' for microservice '{data['microservice_id']}': shm_name={self.mem_mgmt.shm.name}, index={addr_offset}")
-                
-                # DEBUG: Update the metric value in shared memory as the client would do
-                # new_addr = get_value_ptr_in_shm(self.mem_mgmt.shm, addr)
-                # update_metric_value(new_addr, float(data['value']))
-                
-                logger.info(f"Updated metric '{data['name']}' to {data['value']} at address {addr_offset}")
                 return jsonify({"shm_name": self.mem_mgmt.shm.name, "addr": addr_offset})
+            
             except ValueError as e:
                 logger.warning(f"ValueError in create_metric: {str(e)}")
                 return jsonify({"error": str(e)}), 400

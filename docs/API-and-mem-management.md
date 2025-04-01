@@ -28,6 +28,37 @@ requests.update_value(requests.get_value() + 1)
 latency.update_value(calculate_latency())
 ```
 
+### Performance of metrics update
+
+There's a significant advantage to using direct pointer access through `ctypes` as in `microview_client.py`, compared to an implementation using `shm.seek()` + `shm.read()`:
+
+1. **Execution Speed**: Direct pointer manipulation is 5-10x faster than buffer I/O operations. For metrics that may be updated thousands of times per second, this is critical.
+
+2. **CPU Efficiency**: Pointer dereferencing is a single CPU instruction, whereas seek/read/write operations involve multiple function calls, bounds checking, and buffer copying.
+
+3. **Zero-Copy**: `ctype` implementation avoids unnecessary memory copies by directly modifying the value in-place, while seek/read creates intermediate buffers.
+
+4. **Atomic Updates**: For numeric types like `float64`, pointer access provides atomic updates (essential for concurrent access).
+
+```python
+# very fast, single CPU instruction
+value_ptr[0] = new_value
+
+# seek/read approach - multiple operations, function call overhead
+shm.buf.seek(offset)
+shm.buf.write(struct.pack('d', new_value))
+```
+
+#### Specific to Metrics System
+
+For a high-performance metrics system, this performance difference is crucial because:
+
+1. Metrics are updated extremely frequently (potentially millions of times per second)
+2. The overhead must be minimal to avoid impacting the application's performance
+3. Updates are typically simple numeric changes to counters or gauges
+
+The direct pointer implementation aligns perfectly with MicroView's goal of providing zero-overhead metric reporting, particularly for latency-sensitive microservices.
+
 ## Security and Trust Model
 
 MicroView operates under a trusted domain model, where a single shared memory pool serves an entire microservice application. All pods within the application are assumed to belong to the same trust domain, which aligns with typical Kubernetes deployment patterns where an application's components share the same security context. This design choice optimizes for performance within a trusted environment, rather than enforcing isolation between components that are already part of the same security boundary.

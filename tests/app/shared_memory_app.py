@@ -1,3 +1,9 @@
+""" Shared Memory Example
+This example demonstrates how to create a shared memory block using the `multiprocessing` module in Python.
+It creates a structured NumPy array in shared memory, updates its values, and prints the updated values.
+It also shows how to access the shared memory from different processes.
+"""
+
 from multiprocessing import shared_memory
 import random
 import numpy as np
