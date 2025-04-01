@@ -6,3 +6,4 @@ bin/**
 *.pickle
 __pycache__/**
 *.pyc
+*.log

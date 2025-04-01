@@ -26,7 +26,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('microview_client.log')
+        logging.FileHandler('logs/microview_client.log')
     ]
 )
 logger = logging.getLogger('MicroViewClient')
@@ -42,7 +42,6 @@ class MicroViewMetric:
         
         Args:
             shm_name: Name of the shared memory segment
-            index: Index of the metric within the shared memory
             metric_name: Name of the metric
             metric_type: Type of metric (False=counter, True=gauge)
         """
@@ -71,16 +70,6 @@ class MicroViewMetric:
         """
         # return float(self.array[self.index]['value'])
         return self.value_ptr[0]
-    
-    # def close(self) -> None:
-    #     """
-    #     Close the shared memory access.
-    #     """
-    #     if hasattr(self, 'shm') and self.shm:
-    #         self.shm.close()
-
-
-
 
 class MicroViewClient:
     """
@@ -156,45 +145,7 @@ class MicroViewClient:
             
         except requests.RequestException as e:
             raise ConnectionError(f"Failed to create metric: {e}")
-            
-    def delete_metric(self, name: str) -> bool:
-        """
-        Delete a metric from the MicroView system.
-        
-        Args:
-            name: Name of the metric to delete
-            
-        Returns:
-            True if metric was deleted successfully, False otherwise
-        """
-        # Check if metric exists locally
-        if name not in self.metrics:
-            return False
-            
-        # Create the payload for the API request
-        payload = {
-            "microservice_id": self.microservice_id,
-            "name": name
-        }
-        
-        # Close the shared memory access
-        self.metrics[name].close()
-        
-        # Make the API request to delete the metric
-        try:
-            response = requests.post(f"{self.base_url}/delete", json=payload)
-            response.raise_for_status()
-            
-            # Remove the metric from local storage
-            del self.metrics[name]
-            
-            return True
-            
-        except requests.RequestException as e:
-            print(f"Failed to delete metric: {e}")
-            return False
-            
-            
+                    
     def close(self) -> None:
         """
         Close all shared memory resources.

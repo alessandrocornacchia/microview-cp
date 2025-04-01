@@ -20,7 +20,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('microview_host_agent.log')
+        logging.FileHandler('logs/microview_host_agent.log')
     ]
 )
 logger = logging.getLogger('MicroviewHostAgent')
@@ -126,32 +126,9 @@ class MicroservicePageStrategy(AllocationStrategy):
     
 
     def deallocate_metric(self, microservice_id: str, metric_name: str) -> bool:
-        # if microservice_id not in self.registry:
-        #     logger.warning(f"Microservice '{microservice_id}' not found in registry")
-        #     return False
-
-        # page_info = self.registry[microservice_id]
-        # metrics = page_info["metrics"]
-
-        # metric_idx = next((i for i, m in enumerate(metrics) if m["name"] == metric_name), None)
-        # if metric_idx is None:
-        #     logger.warning(f"Metric '{metric_name}' not found for microservice '{microservice_id}'")
-        #     return False
-
-        # metrics.pop(metric_idx)
-        # logger.info(f"Deallocated metric '{metric_name}' for microservice '{microservice_id}'")
-
-        # if not metrics:
-        #     shm_name = page_info["shm_name"]
-        #     if shm_name in self.shm_blocks:
-        #         self.shm_blocks[shm_name].close()
-        #         self.shm_blocks[shm_name].unlink()
-        #         del self.shm_blocks[shm_name]
-        #         del self.arrays[shm_name]
-        #         logger.info(f"Cleaned up shared memory '{shm_name}' for microservice '{microservice_id}'")
-        #     del self.registry[microservice_id]
-
-        # return True
+        """ This allocation strategy does not support deallocation of individual metrics.
+            Metrics will be just released when the page is released.
+        """
         pass
 
 
@@ -202,28 +179,6 @@ class MicroviewHostAgent:
             except Exception as e:
                 logger.error(f"Exception in create_metric: {str(e)}", exc_info=True)
                 return jsonify({"error": f"Failed to create metric: {str(e)}"}), 500
-
-        @self.app.route('/delete', methods=['POST'])
-        def delete_metric():
-            data = request.json
-            logger.debug(f"Received delete_metric request: {data}")
-            required_fields = ['microservice_id', 'name']
-            for field in required_fields:
-                if field not in data:
-                    logger.warning(f"Missing required field: {field}")
-                    return jsonify({"error": f"Missing required field: {field}"}), 400
-
-            try:
-                success = self.mem_mgmt.deallocate_metric(data['microservice_id'], data['name'])
-                if success:
-                    logger.info(f"Deleted metric '{data['name']}' for microservice '{data['microservice_id']}'")
-                    return jsonify({"status": "ok"})
-                else:
-                    logger.warning(f"Metric '{data['name']}' not found for microservice '{data['microservice_id']}'")
-                    return jsonify({"error": f"Metric '{data['name']}' not found for microservice '{data['microservice_id']}'"}), 404
-            except Exception as e:
-                logger.error(f"Exception in delete_metric: {str(e)}", exc_info=True)
-                return jsonify({"error": f"Failed to delete metric: {str(e)}"}), 500
 
         @self.app.route('/health', methods=['GET'])
         def health_check():
