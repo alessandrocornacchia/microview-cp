@@ -65,10 +65,11 @@ and deleting metrics make little sense (when pod disappear, it's page will just 
 - Metrics have now fixed structure (only floating point support), this can be changed with a more flexible memory layout
 - log management 
 - now you have some high level description of the code in the `.md` file, use that for next iterations (either here or in perplexity)
+- Is it normal I can go in RTS with a queue pair that is not associated to any user space code ?
 
 ## RDMA in Linux: primer
 
-To list the available Channel Adapters (CA):
+To list the available Channel Adapters (CA) and RDMA physical ports:
 ```
 $> ibstat
 CA 'mlx5_0'
@@ -97,3 +98,27 @@ CA 'mlx5_0'
 mlx5_1 port 1 ==> ens1f1 (Up)
 ```
 
+### Check the available GIDS to connect queue pairs
+Pick the one with RoCEv2 and associated to the interface you want:
+
+```
+(uview) (base) cornaca@mcnode28:[microview-cp]$ show_gids 
+DEV     PORT    INDEX   GID                                     IPv4            VER     DEV
+---     ----    -----   ---                                     ------------    ---     ---
+mlx5_0  1       0       fe80:0000:0000:0000:966d:aeff:fe38:817e                 v1      ens1f0
+mlx5_0  1       1       fe80:0000:0000:0000:966d:aeff:fe38:817e                 v2      ens1f0
+mlx5_1  1       0       fe80:0000:0000:0000:966d:aeff:fe38:817f                 v1      ens1f1
+mlx5_1  1       1       fe80:0000:0000:0000:966d:aeff:fe38:817f                 v2      ens1f1
+mlx5_1  1       2       0000:0000:0000:0000:0000:ffff:0ac8:001c 10.200.0.28     v1      ens1f1
+mlx5_1  1       3       0000:0000:0000:0000:0000:ffff:0ac8:001c 10.200.0.28     v2      ens1f1
+mlx5_2  1       0       fe80:0000:0000:0000:bace:f6ff:fe4d:cb1c                 v1      ens2f0
+mlx5_2  1       1       fe80:0000:0000:0000:bace:f6ff:fe4d:cb1c                 v2      ens2f0
+mlx5_2  1       2       0000:0000:0000:0000:0000:ffff:0ac8:0034 10.200.0.52     v1      ens2f0
+mlx5_2  1       3       0000:0000:0000:0000:0000:ffff:0ac8:0034 10.200.0.52     v2      ens2f0
+mlx5_3  1       0       fe80:0000:0000:0000:bace:f6ff:fe4d:cb1d                 v1      ens2f1
+mlx5_3  1       1       fe80:0000:0000:0000:bace:f6ff:fe4d:cb1d                 v2      ens2f1
+mlx5_4  1       0       fe80:0000:0000:0000:0ac0:ebff:fe15:3620                 v1      enp65s0f0np0
+mlx5_4  1       1       fe80:0000:0000:0000:0ac0:ebff:fe15:3620                 v2      enp65s0f0np0
+mlx5_5  1       0       fe80:0000:0000:0000:0ac0:ebff:fe15:3621                 v1      enp65s0f1np1
+mlx5_5  1       1       fe80:0000:0000:0000:0ac0:ebff:fe15:3621                 v2      enp65s0f1np1
+```

@@ -3,6 +3,8 @@ from pyverbs.qp import QPInitAttr, QPCap
 import inspect
 import pyverbs.cm_enums as ce
 import pyverbs.enums
+import requests
+from typing import Tuple, Optional, Dict, Any
 
 PAGE_SIZE = 4096
 
@@ -31,8 +33,6 @@ class MRMetadata:
         self.name = name
 
 
-
-
 class RDMACollectorCm:
     """
     Collector that uses RDMA CM to read metrics from remote host memory.
@@ -48,9 +48,11 @@ class RDMACollectorCm:
         Args:
             host_addr: IP address of the remote host
             port: Port number for RDMA connection
+            control_plane_port: Port number for control plane HTTP API
         """
         self.host_addr = host_addr
         self.port = port
+        
         
         # RDMA connection components
         self.cmid = None
@@ -62,7 +64,54 @@ class RDMACollectorCm:
         # Initialize RDMA connection
         self._init_rdma_connection()
     
-    
+    def request_remote_access(self, service_id: str, page_offset: int = 0) -> Tuple[int, int]:
+        """
+        Request access to a remote memory region from the control plane
+        
+        Args:
+            service_id: ID of the microservice that owns the memory page
+            page_offset: Offset of the page within the microservice's memory space
+            
+        Returns:
+            Tuple of (remote_addr, rkey) to be used for RDMA READ operations
+        """
+        try:
+            # In a real implementation, this would make an HTTP request to the control plane
+            # to get the remote memory address and key for the specified service and page
+            
+            # If we had a real control plane API, we'd call something like:
+            # response = requests.get(
+            #     f"{self.control_plane_url}/rdma_access", 
+            #     params={"service_id": service_id, "page_offset": page_offset}
+            # )
+            # response.raise_for_status()
+            # result = response.json()
+            # return result["remote_addr"], result["rkey"]
+            
+            # For now, we'll use a placeholder implementation that returns the
+            # information from the rdma_mr_info.pickle file
+            
+            # This is a placeholder, in a real implementation we'd get this from the control plane
+            import pickle
+            try:
+                with open("rdma_mr_info.pickle", "rb") as f:
+                    mr_info = pickle.load(f)
+                    remote_addr = mr_info.get("addr", 0)
+                    rkey = mr_info.get("rkey", 0)
+                    
+                    # Add page offset to address if needed
+                    if page_offset > 0:
+                        remote_addr += (page_offset * PAGE_SIZE)
+                        
+                    return remote_addr, rkey
+            except Exception as e:
+                print(f"Failed to load MR info from pickle: {e}")
+                # Fallback to dummy values
+                return 0x1000 + (page_offset * PAGE_SIZE), 123
+            
+        except Exception as e:
+            print(f"Error requesting remote access: {e}")
+            raise
 
     def register_remote_read_region(self, remote_addr: int, rkey: int, length: int = PAGE_SIZE, name: str = None):
         """
@@ -183,42 +232,3 @@ class RDMACollectorCm:
     def __del__(self):
         """Destructor to clean up resources"""
         self._cleanup()
-
-
-
-
-# Example usage
-# -----------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # Example parameters - replace with actual values
-    host_addr = "192.168.1.100"  # Replace with target host IP
-    
-    try:
-        # Create collector and establish connection
-        collector = RDMACollectorCm(host_addr)
-        
-        # Register remote memory regions
-        collector.register_remote_read_region(
-            remote_addr=0x1000,  # Replace with actual remote address
-            rkey=123,            # Replace with actual remote key
-            length=1024,         # Replace with actual length to read
-            name="metrics_region_1"
-        )
-        
-        collector.register_remote_read_region(
-            remote_addr=0x2000,  # Different memory region
-            rkey=456,
-            length=512,
-            name="metrics_region_2"
-        )
-        
-        # Read all registered regions
-        data_dict = collector.read_metrics()
-        
-        # Process the results
-        for region_name, data in data_dict.items():
-            print(f"Region '{region_name}': Read {len(data)} bytes: {data[:20].hex()}...")
-            
-    except Exception as e:
-        print(f"Failed to read metrics: {e}")

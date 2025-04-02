@@ -2,10 +2,10 @@
 import pickle
 import time
 import argparse
-from rdma_cm_collector import RDMACollectorCm
 from pyverbs.cmid import CMID, AddrInfo
 from pyverbs.qp import QPInitAttr, QPCap
 import inspect
+import ctypes
 import pyverbs.cm_enums as ce
 import pyverbs.enums
 
@@ -57,7 +57,29 @@ def main():
         except Exception as e:
             # print(f"Error initializing RDMA connection: {e}")
             raise e
-            
+
+        print("*************** Test send() ***************")
+        
+        length = 1000
+        mr_send = cmid.reg_msgs(length)
+        
+        print("Writing into the send MR")
+        
+        send_bytes = "send() test".encode().ljust(length, b'\x00')
+        mr_send.write(send_bytes, length)
+        
+        print("Post send()")
+        cmid.post_send(mr_send)
+
+        # Add this after post_send:
+        wc = cmid.get_send_comp()
+        if wc.status != pyverbs.enums.IBV_WC_SUCCESS:
+            raise RuntimeError(f"Send failed with status: {wc.status}")
+                    
+        print("*************** Check success on passive side ***************")
+        print("")
+        print("*************** Test read() ***************")
+
         # ask input from user for addres and rkey
         remote_addr = input("Enter remote address: ")
         rkey = input("Enter rkey: ")

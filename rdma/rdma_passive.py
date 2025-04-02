@@ -115,7 +115,6 @@ class RDMAPassiveServer:
         buffer_length = self.buffer_size       # Use explicit size
         access_flags = pyverbs.enums.IBV_ACCESS_LOCAL_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ
 
-        print(pd)
         self.mr = MR(pd, buffer_length, access_flags, buffer_addr)
         
         print(f"Memory region created: mr_addr={hex(self.mr.buf)}, buffer_addr={hex(self.buffer.ctypes.data)}, rkey={self.mr.rkey}, size={self.buffer_size}")
@@ -142,12 +141,12 @@ class RDMAPassiveServer:
         """
         Main event loop for processing CM events.
         """
-        print("Waiting for connection requests...")
         
         while self.running:
             try:
                 # In non-blocking mode, get_cm_event would raise an exception if no event is available
                 # Instead, we use a blocking approach to wait for connection
+                print("Waiting for connection requests...")
                 cmid = self.listener_id.get_request()
                 if cmid:
 
@@ -163,9 +162,6 @@ class RDMAPassiveServer:
                 break
             except Exception as e:
                 print(f"Error in event loop: {e}")
-                
-            # Small sleep to prevent CPU spinning if get_request is non-blocking
-            time.sleep(0.1)
                 
     def handle_connect_request(self, cmid):
         """

@@ -59,6 +59,47 @@ For a high-performance metrics system, this performance difference is crucial be
 
 The direct pointer implementation aligns perfectly with MicroView's goal of providing zero-overhead metric reporting, particularly for latency-sensitive microservices.
 
+####Yes, there are significant benefits to grouping contiguous memory region reads within the same QP when performing RDMA READs:
+
+#### Performance Benefits of Contiguous RDMA Reads
+
+The 4KB block size is aligned with Linux page size, i.e., for one service all metrics fit in one page. Contiguous allocation ensures multiple RDMA READS can be batched in a single larger RDMA read.
+
+1. **Reduced PCIe Transactions**: 
+   - Reading multiple contiguous 4KB pages as a single operation reduces PCIe bus transactions
+   - Each separate RDMA operation incurs PCIe overhead (address translation, command posting)
+
+2. **Better Network Utilization**:
+   - Larger transfers maximize InfiniBand/RoCE bandwidth utilization
+   - The ratio of payload to protocol overhead improves significantly
+   - On 100Gbps+ networks, small 4KB reads underutilize available bandwidth
+
+3. **Fewer Work Completions**:
+   - Each RDMA READ generates a completion event
+   - Processing fewer completions reduces CPU overhead significantly
+
+4. **Optimized NIC Processing**:
+   - RDMA NICs are optimized for larger, sequential transfers
+   - DMA engines perform better with contiguous memory regions
+
+5. **Reduced Network Round-trips**:
+   - Each separate READ requires network round-trip latency
+   - A single larger READ can fetch multiple metrics pages at once
+
+### Specific to Your MicroView Architecture
+
+Your page-based allocation strategy already aligns well with this optimization:
+- Each microservice gets a contiguous 4KB page
+- Pages are allocated sequentially in shared memory
+- Multiple microservice pages are contiguous in memory
+
+You could enhance your RDMA collector to:
+1. Identify contiguous pages in the registry
+2. Group them into larger READ operations (e.g., reading 16KB or 64KB at once)
+3. Post fewer, larger READ operations to the QP
+
+This would be particularly beneficial for monitoring clusters with many microservices, allowing your metrics collection to scale efficiently while minimizing overhead.
+
 ## Security and Trust Model
 
 MicroView operates under a trusted domain model, where a single shared memory pool serves an entire microservice application. All pods within the application are assumed to belong to the same trust domain, which aligns with typical Kubernetes deployment patterns where an application's components share the same security context. This design choice optimizes for performance within a trusted environment, rather than enforcing isolation between components that are already part of the same security boundary.
