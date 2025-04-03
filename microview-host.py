@@ -10,10 +10,12 @@ from typing import Dict, Tuple
 import ctypes
 import numpy as np
 from flask import Flask, request, jsonify
-from rdma.helpers import QueuePairPool
-from rdma.rdma_cm_server import RDMAPassiveServer
+from rdma.helpers import MemoryRegionManager, QueuePairPool
+from rdma.cm_server import RDMAPassiveServer
 from multiprocessing import shared_memory
 from metrics import *
+from utils import get_ptr_in_shm
+from defaults import *
 
 # Configure logging
 logging.basicConfig(
@@ -30,8 +32,8 @@ logger = logging.getLogger('MicroviewHostAgent')
 #   100 pods x 100 metrics x 80 bytes
 SHM_POOL_SIZE = 800 * 1024
 SHM_POOL_NAME = "microview"
-DEFAULT_RDMA_DEVICE = "mlx5_1"
-
+DEFAULT_RDMA_MR_SIZE = 64 * 1024  # 64KB maximum size for RDMA read groups
+DEFAULT_QP_POOL_SIZE = 1
 
 class AllocationStrategy(ABC):
     @abstractmethod
@@ -43,7 +45,7 @@ class AllocationStrategy(ABC):
         pass
 
 
-class MicroservicePageStrategy(AllocationStrategy):
+class MetricsMemoryManager(AllocationStrategy):
     """
         Strategy that allocates one page per microservice. 
         All metrics are registered there
@@ -56,22 +58,27 @@ class MicroservicePageStrategy(AllocationStrategy):
         
         # Calculate how many metrics fit in a page
         item_size = np.dtype(metric_dtype).itemsize
-        self.metrics_per_page = MicroservicePageStrategy.PAGE_SIZE // item_size
+        self.metrics_per_page = MetricsMemoryManager.PAGE_SIZE // item_size
         logger.info(f"Each page can hold {self.metrics_per_page} metrics of size {item_size} bytes")
         
         # Calculate how many pages we can fit
-        self.max_pages = SHM_POOL_SIZE // MicroservicePageStrategy.PAGE_SIZE
+        self.max_pages = SHM_POOL_SIZE // MetricsMemoryManager.PAGE_SIZE
         logger.info(f"Shared memory pool can hold {self.max_pages} pages")
         
         # Allocate shared memory for the entire application
-        self.shm = shared_memory.SharedMemory(create=True, size=SHM_POOL_SIZE, name=SHM_POOL_NAME)
+        try:
+            self.shm = shared_memory.SharedMemory(create=True, size=SHM_POOL_SIZE, name=SHM_POOL_NAME)
+            logger.info(f"Created shared memory with name {self.shm.name} and size {SHM_POOL_SIZE} bytes")
+        except Exception as e:
+            logger.error(f"Error creating shared memory: {e}")
+            raise
         
         # Track which pages are allocated
         self.allocated_pages = 0
         
         # Initialize registry
         self.registry = {}  # Maps microservice_id to page info
-        self.shm_blocks = {"microview-demo": self.shm}  # For cleanup
+        self.shm_blocks = {"microview-demo": self.shm}  # For cleanup # TODO this can be avoided..
     
     
     def _create_new_page(self, microservice_id: str) -> MetricsPage:
@@ -81,7 +88,7 @@ class MicroservicePageStrategy(AllocationStrategy):
             raise ValueError("No more shared memory pages available")
         
         # Calculate page offset in the shared memory
-        page_offset = self.allocated_pages * MicroservicePageStrategy.PAGE_SIZE
+        page_offset = self.allocated_pages * MetricsMemoryManager.PAGE_SIZE
         
         # Create numpy array view for this page
         array = np.ndarray(
@@ -135,18 +142,42 @@ class MicroservicePageStrategy(AllocationStrategy):
         """
         pass
 
+    
+    def get_shm_base_addr(self) -> int:
+        """ Get the base address of the shared memory segment """
+        return get_ptr_in_shm(self.shm, 0)
+
+    
+    def cleanup(self):
+        """ Cleanup shared memory and allocated pages """
+        logger.info("Cleaning up shared memory and allocated pages")
+        try:
+            # Close the shared memory
+            self.shm.close()
+            self.shm.unlink()
+            logger.info(f"Shared memory {self.shm.name} cleaned up")
+        except Exception as e:
+            logger.error(f"Error cleaning up shared memory: {e}")
+        
+        # Clear the registry
+        self.registry.clear()
+        self.allocated_pages = 0
+
 
 class MicroviewHostAgent:
     def __init__(self, start_rdma: bool = False, rdma_port: str = "18515", host: str = "0.0.0.0", port: int = 5000):
-        self.start_rdma = start_rdma
-        # self.rdma_port = rdma_port
+        
+        self.start_rdma = start_rdma    # useful for debug
         self.host = host
         self.api_port = port
-        self.qp_pool = None # TODO better name
-        # self.rdma_thread = None
-        self.mem_mgmt = MicroservicePageStrategy()
+        self.qp_pool = None
+        
+        self.mem_mgmt = MetricsMemoryManager()
+        self.mr_mgmt = None
+
         self.app = Flask(__name__)
         self.setup_routes()
+        
         logger.info(f"MicroviewHostAgent initialized with RDMA port {rdma_port} and HTTP port {port}")
 
     def setup_routes(self):
@@ -253,6 +284,58 @@ class MicroviewHostAgent:
                     return jsonify({"error": "Failed to connect queue pair"}), 500
             except Exception as e:
                 return jsonify({"error": str(e)}), 400
+
+        @self.app.route('/rdma/qps/connect', methods=['POST'])
+        def connect_all_queue_pairs():
+            """Connect all queue pairs to remote QPs in a single operation"""
+            
+            if not self.qp_pool:
+                return jsonify({"error": "RDMA pool not running"}), 503
+                
+            data = request.json.get("queue_pairs", [])
+            logger.debug(f"Received connect_all_queue_pairs request: {data}")
+
+            results = []
+            try:
+                # Process each remote QP in the list
+                for i, remote_qp_info in enumerate(data):
+                    if i < len(self.qp_pool.qps):    
+                            
+                        # Connect this queue pair
+                        success = self.qp_pool.connect_queue_pair(i, remote_qp_info)
+                        
+                        if success:
+                            results.append({
+                                "index": i,
+                                "status": "connected",
+                                "qp_num": self.qp_pool.qps[i]["qp_num"]
+                            })
+                        else:
+                            results.append({
+                                "index": i,
+                                "status": "error",
+                                "message": "Failed to connect queue pair"
+                            })
+                
+                # Overall status
+                success_count = sum(1 for r in results if r["status"] == "connected")
+                if success_count > 0:
+                    return jsonify({
+                        "status": "partial_success" if success_count < len(data) else "success",
+                        "connected": success_count,
+                        "total": len(data),
+                        "results": results
+                    })
+                else:
+                    return jsonify({
+                        "status": "failed",
+                        "message": "Failed to connect any queue pairs",
+                        "results": results
+                    }), 500
+                    
+            except Exception as e:
+                logger.error(f"Error connecting multiple queue pairs: {e}")
+                return jsonify({"error": str(e)}), 400
         
         @self.app.route('/rdma/mrs', methods=['GET'])
         def get_memory_regions():
@@ -281,7 +364,7 @@ class MicroviewHostAgent:
                 return jsonify({"error": str(e)}), 400
     
     
-    
+    # This is when it uses the RDMA CM abstraction to start a server
     # def start_rdma_server(self):
     #     logger.info(f"Starting RDMA server on port {self.rdma_port}")
     #     self.qp_pool = RDMAPassiveServer(port=self.rdma_port)
@@ -299,41 +382,48 @@ class MicroviewHostAgent:
     #     logger.info("RDMA server started")
 
     
-    def start_rdma_server(self, qp_pool_size=1):
+    def _init_rdma(self, qp_pool_size=DEFAULT_QP_POOL_SIZE):
         
         # Add API routes for controlling the RDMA server
         self._setup_rdma_control_routes()
-
-        # Create QP pool
-        logger.info(f"Starting RDMA with QP pool size {qp_pool_size}")
         
         try:
+            
             # Initialize QP pool
             self.qp_pool = QueuePairPool(DEFAULT_RDMA_DEVICE, pool_size=qp_pool_size)
-            
-            # TODO this must be done later when creating metrics Create default memory region
-            mr_info = self.qp_pool.mr_manager.create_memory_region("default", 1000)
-            print(mr_info)
+            logger.info(f"Created QP pool with size {qp_pool_size}")
 
-            # Save memory region info to pickle file
-            # self.qp_pool.mr_manager.save_memory_regions(PICKLE_FILE)
+            # Create memory regions
+            self.mr_mgmt = MemoryRegionManager(self.qp_pool.pd)
             
-            logger.info(f"RDMA initialized correctly")
+            # TODO these parameters should be configurable with fallback to default value
+            if DEFAULT_RDMA_MR_SIZE % MetricsMemoryManager.PAGE_SIZE != 0:
+                raise ValueError(f"RDMA MR size {DEFAULT_RDMA_MR_SIZE} must be a multiple of page size {MetricsMemoryManager.PAGE_SIZE}")
+            
+            num_mr = SHM_POOL_SIZE // DEFAULT_RDMA_MR_SIZE
+            base_addr = self.mem_mgmt.get_shm_base_addr()
+
+            for i in range(num_mr):
+                mr_info = self.mr_mgmt.register_memory_region(
+                    name=f"RDMA-MR-{i}",
+                    addr=base_addr + (i * DEFAULT_RDMA_MR_SIZE),
+                    size=DEFAULT_RDMA_MR_SIZE)
+                        
+            logger.info(f"✅ RDMA initialized correctly")
                 
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         except Exception as e:
-            logger.error(f"Error: {e}")
-            # Clean up resources
-            if self.qp_pool:
-                self.qp_pool.cleanup()
+            logger.error(f"❌ Error: {e}")
+            self.cleanup()
+            raise
             
 
     
     def start(self):
         try:
             if self.start_rdma:
-                self.start_rdma_server()
+                self._init_rdma()
             logger.info(f"Starting REST API on {self.host}:{self.api_port}")
             self.app.run(host=self.host, port=self.api_port)
         except KeyboardInterrupt:
@@ -346,14 +436,11 @@ class MicroviewHostAgent:
     def cleanup(self):
         logger.info("Cleaning up resources")
         if self.qp_pool:
-                self.qp_pool.cleanup()
-        if isinstance(self.mem_mgmt, MicroservicePageStrategy):
-            for shm_name, shm in self.mem_mgmt.shm_blocks.items():
-                try:
-                    shm.close()
-                    shm.unlink()
-                except Exception as e:
-                    logger.error(f"Error cleaning up shared memory '{shm_name}': {str(e)}")
+            self.qp_pool.cleanup()
+        if self.mr_mgmt:
+            self.mr_mgmt.cleanup()
+        if self.mem_mgmt:
+            self.mem_mgmt.cleanup()
         logger.info("Cleanup completed")
 
 

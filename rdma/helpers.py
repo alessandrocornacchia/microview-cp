@@ -34,14 +34,8 @@ from pyverbs.cq import CQ
 from pyverbs.addr import GID
 from pyverbs.addr import GlobalRoute
 from pyverbs.addr import AHAttr
-
-
-# Default values TODO move in config file .env
-DEFAULT_BUFFER_SIZE = 4096
-DEFAULT_QP_POOL_SIZE = 1
-DEFAULT_RDMA_DEVICE = "mlx5_1"
-DEFAULT_GID = 3
-DEFAULT_IB_PORT = 1
+from pyverbs.wr import SGE, RecvWR, SendWR
+from defaults import *
 
 # Configure logging
 logging.basicConfig(
@@ -127,12 +121,13 @@ class MemoryRegionManager:
         buffer_addr = buffer.ctypes.data
         
         # Register the memory region
-        mr_info = self.register_memory_region(name, buffer_addr, size)
+        self.register_memory_region(name, buffer_addr, size)
 
         # Store the buffer reference in our memory_regions dict to keep it alive
         self.memory_regions[name]["buffer"] = buffer
 
-        return mr_info
+        return self.get_memory_region_info(name)
+
     
     def save_memory_region_info(self, filename: str):
         """ Save memory region information to a file for debugging and sharing with clients."""
@@ -149,6 +144,15 @@ class MemoryRegionManager:
             logger.info(f"Saved RDMA info to pickle file: {filename}")
         
     
+    def get_memory_region(self, name: str) -> Optional[MR]:
+        """Get the MR object for a registered memory region"""
+        if name not in self.memory_regions:
+            return None
+        
+        mr_info = self.memory_regions[name]
+        return mr_info["mr"]
+    
+
     def get_memory_region_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Get information about a registered memory region"""
         if name not in self.memory_regions:
@@ -320,10 +324,10 @@ class QueuePairPool:
         
         if index < 0 or index >= len(self.qps) or index is None:
             raise ValueError(f"Queue Pair index {index} out of range (0-{len(self.qps)-1})")
-        # TODO common to rdma client
         return {
                 "qp_num": self.qps[index]["qp_num"],
                 "gid": str(self.gid),
+                "in_use": self.qps[index]["in_use"],
             }
 
     def save_queue_pair_info(self, filename: str):
@@ -389,6 +393,7 @@ class QueuePairPool:
             
             # Cache the QP info of the remote QP is trying to connect to here
             local_qp["remote_info"] = remote_info
+            local_qp["in_use"] = True
         
             logger.info(f"✅ Queue Pair #{index} (qp_num={local_qp['qp_num']}) connected to remote QP {remote_info['qp_num']}")
             return True
@@ -399,11 +404,7 @@ class QueuePairPool:
     
     def list_queue_pairs(self) -> List[Dict[str, Any]]:
         """List all queue pairs in the pool with their status"""
-        return [{
-            "index": i,
-            "qp_num": qp_info["qp_num"],
-            "in_use": qp_info["in_use"]
-        } for i, qp_info in enumerate(self.qps)]
+        return [self.get_qp_local_info(i) for i in range(len(self.qps))]
     
     def cleanup(self):
         """Clean up all queue pairs and RDMA resources"""
@@ -429,6 +430,170 @@ class QueuePairPool:
             self.ctx.close()
             
         logger.info("RDMA resources cleaned up")
+
+
+# TODO use this instead of dictionary above
+class MRMetadata:
+    """
+    Represents a remote memory region that can be accessed via RDMA READ.
+    Contains all necessary information for performing RDMA operations.
+    """
+    def __init__(self, remote_addr: int, rkey: int, length: int, mr, name: str = None):
+        """
+        Initialize a remote memory region.
+        
+        Args:
+            remote_addr: Remote memory address to read from
+            rkey: Remote key for the memory region
+            length: Length of the memory region to read
+            buffer: Local buffer to store read data
+            mr: Memory registration for the local buffer
+            name: Optional name identifier for this region
+        """
+        self.remote_addr = remote_addr
+        self.rkey = rkey
+        self.length = length
+        self.mr = mr
+        self.name = name
+
+
+class OneSidedReader:
+    """
+    A simple class to perform one-sided RDMA READ operations. Assumes the QPs are already connected
+    and in RTS (Ready to Send state)
+    """
+
+    def __init__(self, pd : PD, qp: QP, remote_mrs : List[MRMetadata], scrape_interval: int = 1):
+        """
+        Initialize the one-sided reader
+        
+        Args:
+            qp: Queue Pair object to use for RDMA operations
+            remote_mr: Remote memory region metadata
+        """
+        self.pd = pd
+        self.qp = qp
+        self.remote_mrs = remote_mrs
+        self.n_mr = len(remote_mrs)
+        self.mrm = None 
+        self.scrape_interval = scrape_interval
+        
+        # create local RDMA buffers
+        self._init_local_mr()
+    
+
+    def _init_local_mr(self):
+        """
+        # Create desired number of local memory region for RDMA operations. Each local Mr is a buffer for a
+        # remote MR operation. 
+        # TODO verify if this is needed when reading from multiple remote regions.
+        # TODO RDMA ensures operations execute in order on one QP, one might be enough? 
+        # TODO probably I can send SGE at once to amortize cost of syscalls on a single QP, and also poll for completion
+        """
+        self.mrm = MemoryRegionManager(self.pd)
+        
+        for i in range(self.n_mr):
+            local_mr = self.mrm.create_memory_region(f"local_mr_{i}", self.remote_mrs[i].length)
+            logger.info(f"Created local memory region: {local_mr}")
+
+
+    def start(self):
+        """ 
+        RDMA reader loop, should be pin to a dedicated thread ideally 
+        """
+        
+        try:
+            while True:
+
+                # issue RDMA reads
+                for i in range(self.n_mr):
+                    self.rdma_read(i)
+
+                time.sleep(0.1)  # Sleep to avoid busy waiting
+
+                # wait for completions
+                ncomp = 0
+                for i in range(self.n_mr):
+                    res = self.poll_completion(i)
+                    if res:
+                        ncomp += 1
+                logger.debug(f"Polled {ncomp} completions")
+
+                # wait sometime until next sleep request
+                time.sleep(self.scrape_interval)
+        except KeyboardInterrupt:
+            logger.info("Gracefully terminating RDMA operations")
+            self.cleanup()
+
+    def cleanup(self):
+        """Clean up local memory regions, no Queue Pairs as those are managed externally"""
+        if self.mrm:
+            self.mrm.cleanup()
+        
+
+    def rdma_read(self, index : int):
+        """
+        Perform an RDMA READ operation
+        
+        Args:
+            remote_addr: Remote memory address to read from
+            rkey: Remote key for the memory region
+            length: Length of data to read (defaults to buffer_size)
+            
+        Returns:
+            The data read from remote memory
+        """
+        
+        try:
+            remote_addr = self.remote_mrs[index].remote_addr
+            rkey = self.remote_mrs[index].rkey
+            length = self.remote_mrs[index].length
+            mr = self.mrm.get_memory_region(f"local_mr_{index}")
+
+            logger.info(f"Creating RDMA READ work request, remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
+            # Create RDMA READ work request
+            wr = SendWR(
+                opcode=pyverbs.enums.IBV_WR_RDMA_READ,
+                num_sge=1,
+                sg=[SGE(mr.buf, mr.length, mr.lkey)],            
+            )
+            wr.set_wr_rdma(rkey, remote_addr)
+
+            # Post to QP
+            qp = qp_pool.get_qp_object(0)
+            qp.post_send(wr)
+
+            logger.info(f"Posted RDMA READ request: remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
+            
+        except Exception as e:
+            logger.error(f"Error performing RDMA READ: {e}")
+            raise
+
+    
+    def poll_completion(self, index : int):
+        """
+        Poll for completion of RDMA READ operation
+        """
+        res = None
+        
+        try:
+            # Poll for completion
+            wc_num, wcs = qp_pool.cq.poll()
+        
+            # if there is some content return, else None
+            if wc_num:
+                if wcs[0].status != pyverbs.enums.IBV_WC_SUCCESS:
+                    raise RuntimeError(f"❌ RDMA READ failed with status: {wcs[0].status}")
+                
+                mr = self.mrm.get_memory_region(f"local_mr_{index}")
+                res = mr.read(mr.length, 0).decode()
+                logger.debug(f"✅ RDMA READ completed successfully: {res}")
+        except Exception as e:
+            logger.error(f"❌ Error polling CQ: {e}")
+            raise
+            
+        return res
+
 
 
 # Handler for graceful termination
@@ -583,6 +748,47 @@ def test_mr_read(args, qp_pool):
             mr_manager.cleanup()
 
 
+def test_one_sided_reader(args, qp_pool):
+    """"
+    Test a READ() operation using RDMA, with a memory region created by a passive side.
+    MR information is saved to a file for the client to use.
+    """
+    RDMA_MR_INFO_FILE = "mr_info.json"
+    
+    # Server creates default memory region
+    if not args.client:
+        mr_manager = MemoryRegionManager(qp_pool.pd, default_buffer_size=args.buffer_size)
+        mr_manager.create_memory_region("default", args.buffer_size)
+        mr_manager.save_memory_region_info(RDMA_MR_INFO_FILE)
+    
+    # both connect queue pairs
+    test_qp_connect(args, qp_pool)
+
+    # client will retrieve memory region information and issue read requests
+    if args.client:
+        # running as client for RDMA READS
+        fn = input("Enter MR filename or Press Enter to start RDMA reads...")
+        if not fn:
+            fn = RDMA_MR_INFO_FILE
+        addr, rkey, size = mr_info_from_file(fn)
+        logger.info(f"Loaded memory region info from {fn}, addr={hex(addr)}, rkey={rkey}, size={size}")
+        # Perform RDMA READ with one-sided reader
+        remote_mr = MRMetadata(addr, rkey, size, None)
+        one_sided_reader = OneSidedReader(qp_pool.pd, qp_pool.get_qp_object(0), [remote_mr])
+        one_sided_reader.start()
+    else:
+        # Keep main thread alive for testing
+        try:
+            print("Waiting for RDMA reads(). Press Ctrl+C to exit.")
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Exiting RDMA server")
+            pass
+        finally:
+            mr_manager.cleanup()
+
+
 if __name__ == "__main__":
     import argparse
     # Add parent directory to path for imports
@@ -616,8 +822,9 @@ if __name__ == "__main__":
         # Initialize QP pool
         qp_pool = QueuePairPool(args.rdma_device, pool_size=args.qp)
         
-        test_mr_read(args, qp_pool)
+        # test_mr_read(args, qp_pool)
         # test_qp_connect(args, qp_pool) #TODO make this selection possible from commandline
+        test_one_sided_reader(args, qp_pool)
                 
             
     except KeyboardInterrupt:

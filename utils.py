@@ -6,7 +6,7 @@ import pickle
 from typing import Any, Dict
 
 
-def get_value_ptr_in_shm(shm, offset):
+def get_ptr_in_shm(shm, offset = 0):
     """ Maps the value pointer to the process memory space, using offset from the base address of the shared memory
     in the process virtual address space."""
     shm_base_addr = ctypes.addressof(ctypes.c_char.from_buffer(shm.buf))

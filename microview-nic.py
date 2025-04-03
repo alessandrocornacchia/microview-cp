@@ -1,11 +1,15 @@
+import abc
+from typing import Dict, List, Tuple, Any, Optional, Callable
 import time
 import logging
 import requests
 import numpy as np
-from typing import Dict, List, Tuple, Any, Optional, Callable
 
 from prometheus_client import start_http_server, REGISTRY, Metric
-from rdma.rdma_cm_collector import RDMACollectorCm
+from defaults import *
+#from rdma.cm_collector import RDMACollectorCm
+from rdma.helpers import QueuePairPool
+#from readers.rdma_connections import group_memory_pages_contiguous
 
 # Configure logging
 logging.basicConfig(
@@ -18,218 +22,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger('MicroviewNIC')
 
-# Constants
-PAGE_SIZE = 4096
-MAX_GROUP_SIZE = 64 * 1024  # 64KB maximum size for RDMA read groups
 
-def group_memory_pages_contiguous(metrics_layout: Dict[str, Dict], num_connections: int) -> List[List[Dict]]:
-    """
-    Group memory pages by contiguous page offsets, ensuring pages within a group are adjacent in memory
-    
-    Args:
-        metrics_layout: Dictionary mapping microservice IDs to their page info
-        num_connections: Number of RDMA connections to distribute groups across
-        
-    Returns:
-        List of groups, where each group is a list of page dictionaries.
-    """
-    # Convert the layout into a list of pages with their metadata
-    pages = []
-    for microservice_id, page_info in metrics_layout.items():
-        pages.append({
-            "microservice_id": microservice_id,
-            "page_offset": page_info.get("page_offset", 0),
-            "num_entries": page_info.get("num_entries", 0),
-            "max_metrics": page_info.get("max_metrics", 0)
-        })
-    
-    # Sort pages by page_offset to find contiguous pages
-    pages.sort(key=lambda x: x["page_offset"])
-    
-    # Group pages into chunks of contiguous pages that fit within MAX_GROUP_SIZE
-    groups = []
-    current_group = []
-    current_size = 0
-    last_page_end_offset = -1  # Track the end of the last page in the current group
-    
-    for page in pages:
-        page_offset = page["page_offset"]
-        
-        # Check if this page is contiguous with the previous one
-        is_contiguous = (page_offset == last_page_end_offset) or (not current_group)
-        
-        # Start a new group if:
-        # 1. The current group would exceed max size with this page, OR
-        # 2. This page is not contiguous with the last page in the group
-        if ((current_size + PAGE_SIZE > MAX_GROUP_SIZE) or (not is_contiguous)) and current_group:
-            groups.append(current_group)
-            current_group = []
-            current_size = 0
-        
-        current_group.append(page)
-        current_size += PAGE_SIZE
-        last_page_end_offset = page_offset + PAGE_SIZE # Update the end offset
-        logger.debug(f"Adding page {page['microservice_id']} to current group, size: {current_size}")
-    
-    # Add the last group if not empty
-    if current_group:
-        groups.append(current_group)
-    
-    # Ensure we have at least one group
-    if not groups:
-        logger.warning("No valid page groups created from metrics layout")
-        return []
-    
-    # If we have fewer groups than connections, some connections will be idle
-    num_connections = min(num_connections, len(groups))
-    if num_connections <= 0:
-        logger.warning("No valid connections specified")
-        return []
-    
-    # Distribute groups evenly across connections
-    connection_groups = [[] for _ in range(num_connections)]
-    for i, group in enumerate(groups):
-        connection_idx = i % num_connections
-        connection_groups[connection_idx].extend(group)
-    
-    logger.info(f"Created {len(groups)} page groups distributed across {num_connections} connections")
-    for i, group in enumerate(groups):
-        page_offsets = [page["page_offset"] for page in group]
-        microservices = [page["microservice_id"] for page in group]
-        logger.debug(f"Group {i}: {len(group)} pages, offsets: {page_offsets}, microservices: {microservices}")
-        
-    return connection_groups
-
-class RDMAManager:
-    """Manages RDMA connections and memory region grouping"""
-    
-    def __init__(self, host_addr: str, port: str = "18515", num_connections: int = 1, 
-                 metrics_layout: Dict[str, Dict] = None,
-                 grouping_function: Callable = group_memory_pages_contiguous):
-        """
-        Initialize the RDMA manager
-        
-        Args:
-            host_addr: Address of the host running the RDMA server
-            port: Port of the RDMA server
-            num_connections: Number of RDMA connections to create
-            metrics_layout: Optional pre-loaded metrics layout
-            grouping_function: Function to use for grouping memory pages
-        """
-        self.host_addr = host_addr
-        self.port = port
-        self.num_connections = max(1, num_connections)  # At least one connection
-        self.grouping_function = grouping_function
-        self.collectors = []  # List of RDMACollectorCm instances
-        self.metrics_page_groups = []  # List of metric groups for each connection
-        self.metrics_layout = metrics_layout  # Store the metrics layout
-        
-        logger.info(f"Initializing RDMA Manager with {self.num_connections} connections to {host_addr}:{port}")
-        
-        # If metrics layout is provided, group pages right away
-        if metrics_layout:
-            self.memory_pages_to_rdma_mr(metrics_layout)
-            # Group memory pages
-            logger.info(f"Grouped metrics into {len(self.metrics_page_groups)} connection groups")
-        
-    
-    # NOTE: having this function allows lazy loading of the metrics layout
-    def memory_pages_to_rdma_mr(self, metrics_layout: Dict[str, Dict]) -> List[List[Dict]]:
-        """
-        Group memory pages into RDMA memory regions using the current grouping function
-        
-        Args:
-            metrics_layout: Dictionary mapping microservice IDs to their metrics info
-            
-        Returns:
-            List of groups, where each group is a list of page dictionaries
-        """
-        self.metrics_layout = metrics_layout
-        self.metrics_page_groups = self.grouping_function(
-            metrics_layout, 
-            self.num_connections
-        )    
-        return self.metrics_page_groups
-    
-    
-    def initialize_connections(self):
-        """Initialize RDMA connections based on the grouped memory regions"""
-        if not self.metrics_page_groups:
-            logger.warning("No connection groups defined. Call memory_pages_to_rdma_mr first.")
-            return
-        
-        # Create collectors for each connection
-        self.collectors = []
-        for i in range(min(self.num_connections, len(self.metrics_page_groups))):
-            try:
-                collector = RDMACollectorCm(self.host_addr, self.port)
-                self.collectors.append(collector)
-                logger.info(f"Initialized RDMA connection {i+1}/{self.num_connections}")
-            except Exception as e:
-                logger.error(f"Failed to initialize RDMA connection {i+1}: {e}")
-    
-    
-    def setup_remote_access(self):
-        """Request remote access for each connection and register memory regions"""
-        if not self.collectors or not self.connection_groups:
-            logger.warning("No connections or groups defined.")
-            return
-            
-        for i, (collector, group) in enumerate(zip(self.collectors, self.connection_groups)):
-            try:
-                for page_info in group:
-                    # Request remote access for this memory page
-                    remote_addr, rkey = collector.request_remote_access(
-                        service_id=page_info.get("microservice_id"),
-                        page_offset=page_info.get("page_offset", 0)
-                    )
-                    
-                    # Register the memory region for RDMA reads
-                    collector.register_remote_read_region(
-                        remote_addr=remote_addr,
-                        rkey=rkey,
-                        length=PAGE_SIZE,
-                        name=f"{page_info.get('microservice_id')}"
-                    )
-                    
-                logger.info(f"Registered {len(group)} memory regions for connection {i+1}")
-            except Exception as e:
-                logger.error(f"Failed to setup remote access for connection {i+1}: {e}")
-    
-    def read_all_metrics(self) -> Dict[str, bytes]:
-        """
-        Read all metrics from all RDMA connections
-        
-        Returns:
-            Dictionary mapping metric names to their values
-        """
-        all_results = {}
-        
-        for i, collector in enumerate(self.collectors):
-            try:
-                results = collector.read_metrics()
-                all_results.update(results)
-                logger.debug(f"Read {len(results)} metrics from connection {i+1}")
-            except Exception as e:
-                logger.error(f"Failed to read metrics from connection {i+1}: {e}")
-        
-        return all_results
-    
-    def cleanup(self):
-        """Clean up all RDMA connections"""
-        for collector in self.collectors:
-            try:
-                # The collector's destructor will handle cleanup
-                pass
-            except Exception as e:
-                logger.error(f"Error during RDMA collector cleanup: {e}")
-
-class MicroView:
-    """MicroView collector for Prometheus that reads metrics using RDMA"""
+class MicroViewBase(abc.ABC):
+    """Abstract base class for MicroView collectors that read metrics using RDMA"""
     
     def __init__(self, control_plane_url: str):
         """
-        Initialize the MicroView collector
+        Initialize the MicroView collector base
         
         Args:
             control_plane_url: URL of the MicroView control plane
@@ -237,7 +36,7 @@ class MicroView:
         self.control_plane_url = control_plane_url
         self.metrics_layout = {}  # Memory layout of metrics from control plane
         self.metrics_config = {}  # Configuration of metrics (types, etc.)
-        self.rdma_manager = None
+        self.rdma = None
         
         # Parse host and port from control plane URL
         host_parts = control_plane_url.split(':')
@@ -245,7 +44,8 @@ class MicroView:
         self.port = host_parts[1] if len(host_parts) > 1 else "5000"
         
         logger.info(f"Initializing MicroView collector with control plane at {control_plane_url}")
-        
+    
+    @abc.abstractmethod
     def setup(self, num_rdma_connections: int = 1):
         """
         Initialize the collector by fetching metrics layout and setting up RDMA
@@ -253,30 +53,7 @@ class MicroView:
         Args:
             num_rdma_connections: Number of RDMA connections to create
         """
-        try:
-            # Fetch memory layout from control plane
-            metrics_layout = self.get_memory_layout()
-            logger.info(f"Fetched memory layout with {len(metrics_layout)} microservices")
-            
-            # Initialize RDMA manager
-            self.rdma_manager = RDMAManager(
-                self.host,
-                num_connections=num_rdma_connections,
-                grouping_function=group_memory_pages_contiguous,
-                metrics_layout=metrics_layout
-            )
-            
-            # Initialize RDMA connections
-            self.rdma_manager.initialize_connections()
-            
-            # Set up remote access
-            #  TODO self.rdma_manager.setup_remote_access()
-            
-            logger.info("MicroView collector initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize MicroView collector: {e}")
-            raise
+        pass
     
     def get_memory_layout(self) -> Dict[str, Dict]:
         """
@@ -293,7 +70,7 @@ class MicroView:
             logger.error(f"Failed to fetch memory layout: {e}")
             # Return empty dict or raise exception based on your error handling strategy
             return {}
-        
+
     def configure_collector(self, service_id: str, *args, **kwargs):
         """Configure collector for a specific service (placeholder for future functionality)"""
         logger.info(f"Configuring collector for service {service_id}")
@@ -318,7 +95,7 @@ class MicroView:
         
         try:
             # Read all metrics using RDMA
-            raw_metrics = self.rdma_manager.read_all_metrics()
+            raw_metrics = self.rdma.read_all_metrics()
             
             # Process raw metrics into Prometheus format
             # This is a simplified implementation - in reality you would need to parse
@@ -349,9 +126,136 @@ class MicroView:
     
     def __del__(self):
         """Clean up resources"""
-        if self.rdma_manager:
-            self.rdma_manager.cleanup()
+        if self.rdma:
+            self.rdma.cleanup()
 
+
+
+class MicroView(MicroViewBase):
+    """Standard implementation of MicroView collector"""
+    
+    def __init__(self, control_plane_url):
+        super().__init__(control_plane_url)
+        self.qp_pool = None
+
+
+    def connect_with_microview_host(self):
+        """
+        Creates Queue Pair pool, exchange queue pair information with the host and connects the queue pairs
+        """
+        logger.info("Connecting with host")
+        try:
+            # 1. Initialize QP pool
+            self.qp_pool = QueuePairPool(DEFAULT_RDMA_DEVICE, pool_size=DEFAULT_QP_POOL_SIZE)
+
+            # 2. Obtain local QP info
+            local_qp_info = self.qp_pool.list_queue_pairs()
+
+            # 3. Send local QP info to control plane
+            response = requests.get(
+                f"http://{self.control_plane_url}/rdma/qps",
+            )
+            response.raise_for_status()
+
+            # 4. Read remote host QP info in response
+            remote_qp_info = response.json().get("queue_pairs", [])
+            if not remote_qp_info:
+                raise RuntimeError("❌ No remote QP info received from control plane")
+            logger.debug(f"Received remote QP info: {remote_qp_info}")
+
+            # 5. Connect local QP to remote QP in pairs
+            for i,qp_info in enumerate(remote_qp_info):
+                self.qp_pool.connect_queue_pair(i, qp_info)
+
+            # 6. Ask remote control plane to connect all
+            response = requests.post(
+                f"http://{self.control_plane_url}/rdma/qps/connect", 
+                json={"queue_pairs": local_qp_info},
+                timeout=10,
+            )
+            response.raise_for_status()
+            logger.info("✅ Connected with host")
+
+        except Exception as e:
+            logger.info(f"❌ Failed to connect with host: {e}")
+            self.cleanup()
+            raise e
+            
+
+    def setup(self, num_rdma_connections: int = 1):
+        """
+        Initialize the collector by fetching metrics layout and setting up RDMA.
+        Assumes that the host is already initialized and all memory regions are there.
+        No agreement on MRs. Static configuration is used.
+        
+        Args:
+            num_rdma_connections: Number of RDMA connections to create
+        """
+        try:
+            # TODO decide Fetch memory layout from control plane
+            metrics_layout = self.get_memory_layout()
+            logger.info(f"Fetched memory layout with {len(metrics_layout)} microservices")
+            
+            # set queue pairs
+            self.connect_with_microview_host()
+
+            # TODO set local memory regions
+            ....
+
+            # TODO Here will use the one-sided RDMA reader
+            self.rdma = ...
+            
+            
+            logger.info("✅ MicroView collector initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize MicroView collector: {e}")
+            raise
+
+
+    def cleanup(self):
+        """Clean up resources"""
+        if self.rdma:
+            self.rdma.cleanup()
+        if self.qp_pool:
+            self.qp_pool.cleanup()
+        logger.info("MicroView collector cleaned up")
+
+
+# class MicroViewConn(MicroViewBase):
+#     """Standard implementation of MicroView collector"""
+    
+#     def setup(self, num_rdma_connections: int = 1):
+#         """
+#         Initialize the collector by fetching metrics layout and setting up RDMA
+        
+#         Args:
+#             num_rdma_connections: Number of RDMA connections to create
+#         """
+#         try:
+#             # Fetch memory layout from control plane
+#             metrics_layout = self.get_memory_layout()
+#             logger.info(f"Fetched memory layout with {len(metrics_layout)} microservices")
+            
+#             # Initialize RDMA connection based manager
+#             self.rdma = RDMACollectorCm(
+#                 self.host,
+#                 num_connections=num_rdma_connections,
+#                 grouping_function=group_memory_pages_contiguous,
+#                 metrics_layout=metrics_layout
+#             )
+            
+#             # Initialize RDMA connections
+#             self.rdma.initialize_connections()
+            
+#             # Set up remote access
+#             #  TODO self.rdma_manager.setup_remote_access()
+            
+#             logger.info("MicroView collector initialized successfully")
+            
+#         except Exception as e:
+#             logger.error(f"Failed to initialize MicroView collector: {e}")
+#             raise
 
 
 def run_test(name):
@@ -390,8 +294,10 @@ if __name__ == "__main__":
             # sleep for some time to let services start and register thei metrics with microview agent 
             time.sleep(1)
             
+            uview.connect_with_microview_host()
+
             # Set up the collector with 1 RDMA connection (i.e., 1 Queue Pair)
-            uview.setup(num_rdma_connections=1)
+            #uview.setup(num_rdma_connections=1)
             
             logger.info("MicroView setup test passed")
             
@@ -425,8 +331,8 @@ if __name__ == "__main__":
             logger.error(f"Error: {e}")
         finally:
             # Cleanup
-            if hasattr(uview, 'rdma_manager') and uview.rdma_manager:
-                uview.rdma_manager.cleanup()
+            if hasattr(uview, 'rdma_manager') and uview.rdma:
+                uview.rdma.cleanup()
 
     test_function_name = "test_" + args.test.lower()
     run_test(test_function_name)

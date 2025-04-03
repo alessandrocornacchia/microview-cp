@@ -5,33 +5,9 @@ import pyverbs.cm_enums as ce
 import pyverbs.enums
 import requests
 from typing import Tuple, Optional, Dict, Any
+from helpers import MRMetadata
 
 PAGE_SIZE = 4096
-
-
-class MRMetadata:
-    """
-    Represents a remote memory region that can be accessed via RDMA READ.
-    Contains all necessary information for performing RDMA operations.
-    """
-    def __init__(self, remote_addr: int, rkey: int, length: int, mr, name: str = None):
-        """
-        Initialize a remote memory region.
-        
-        Args:
-            remote_addr: Remote memory address to read from
-            rkey: Remote key for the memory region
-            length: Length of the memory region to read
-            buffer: Local buffer to store read data
-            mr: Memory registration for the local buffer
-            name: Optional name identifier for this region
-        """
-        self.remote_addr = remote_addr
-        self.rkey = rkey
-        self.length = length
-        self.mr = mr
-        self.name = name
-
 
 class RDMACollectorCm:
     """

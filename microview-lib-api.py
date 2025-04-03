@@ -5,7 +5,7 @@ from typing import Dict, Optional, Union, Any
 from metrics import metric_dtype
 import ctypes 
 import logging
-from utils import open_untracked_shared_memory, get_value_ptr_in_shm
+from utils import open_untracked_shared_memory, get_ptr_in_shm
 
 # >>>>>> PATCH not to let multiprocessing clean up shared memory
 # This is a workaround to prevent the multiprocessing library from cleaning up shared memory
@@ -128,7 +128,7 @@ class MicroViewClient:
             if not self.shm:
                 # self.shm = open_untracked_shared_memory(shm_name)
                 self.shm = shared_memory.SharedMemory(name=shm_name)
-            value_ptr = get_value_ptr_in_shm(self.shm, value_ptr_offset)
+            value_ptr = get_ptr_in_shm(self.shm, value_ptr_offset)
 
             # Create a MicroViewMetric object
             metric = MicroViewMetric(

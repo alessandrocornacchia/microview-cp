@@ -34,7 +34,8 @@ On the other hand, MicroView agent:
 1. allocates shared memory region and closes TCP connection
 2. sends RDMA `R_key` to the microview agent counter part which sits on the SmartNIC
 
-## Python prototype run instructions
+
+# Python prototype run instructions
 
 ### Test RDMA READ Pyverb
 First test a simple client/server Pyverbs example:
@@ -57,6 +58,61 @@ Then start test reading metrics:
 ```
 python rdma/test_rdma_connection.py --host 10.200.0.28 --port 18515
 ```
+
+## Test RDMA one-sided reader 
+This test connects Queue Pairs (QP) on a RDMA passive side and a RDMA active side. 
+
+**Requirements** For this test, the control information information is exchanged by serialization/deserialization to filesystem. Therefore, please run active/passive side on same machine.
+
+
+### Start the passive side 
+Open two terminals. The passive side creates the memory region to be READ()
+```
+(uview) (base) cornaca@mcnode28:[microview-cp]$ python rdma/helpers.py --debug
+[INFO] 03 Apr 2025 13:37:38 helpers.py:828: Starting RDMA with QP pool size 1
+[INFO] 03 Apr 2025 13:37:38 helpers.py:234: Opened RDMA device: mlx5_1
+[DEBUG] 03 Apr 2025 13:37:38 helpers.py:268: Created Queue Pair #0 attributes
+[DEBUG] 03 Apr 2025 13:37:38 helpers.py:285: Queue Pair #0 transitioned to INIT state
+[INFO] 03 Apr 2025 13:37:38 helpers.py:296: Created Queue Pair #0: GID=0000:0000:0000:0000:0000:ffff:0ac8:001c, qp_num=831
+[INFO] 03 Apr 2025 13:37:38 helpers.py:302: Created Queue Pair pool with 1 QPs
+[INFO] 03 Apr 2025 13:37:38 helpers.py:102: Registered external memory region 'default': addr=0x559bf92ee020, rkey=2342331, size=4096
+[INFO] 03 Apr 2025 13:37:38 helpers.py:147: Saved RDMA info to JSON file: mr_info.json
+[INFO] 03 Apr 2025 13:37:38 helpers.py:151: Saved RDMA info to pickle file: mr_info.json
+[INFO] 03 Apr 2025 13:37:38 helpers.py:350: Saved RDMA info to JSON file: rdma_passive_info
+[INFO] 03 Apr 2025 13:37:38 helpers.py:354: Saved RDMA info to pickle file: rdma_passive_info
+[INFO] 03 Apr 2025 13:37:38 helpers.py:701: RDMA started, check rdma_passive_info.json and rdma_passive_info.pickle for details
+Enter filename with remote RDMA information, or Press Enter for default: 
+```
+
+### Start the active side 
+Now repeat the same on a second terminal, with option `--client`
+```
+python rdma/helpers.py --debug --local-to rdma_active_info --client
+```
+
+At this point follow the instructions on the terminals to exchange control plane information. This is needed to connect the QP and prepare the QP in Ready to Send (RTS) mode. 
+**NOTE** Do not try to proceed with reading the MR before both sides have successfully connected
+
+```
+Enter filename with remote RDMA information, or Press Enter for default: 
+[INFO] 03 Apr 2025 13:37:50 helpers.py:377: Connecting to remote QP: 831, GID: 0000:0000:0000:0000:0000:ffff:0ac8:001c
+[INFO] 03 Apr 2025 13:37:50 helpers.py:404: ✅ Queue Pair #0 (qp_num=832) connected to remote QP 831
+```
+
+### Periodic READ()
+
+Now start reading
+```
+Enter MR filename or Press Enter to start RDMA reads...
+[INFO] 03 Apr 2025 13:37:51 helpers.py:784: Loaded memory region info from mr_info.json, addr=0x559bf92ee020, rkey=2342331, size=4096
+[INFO] 03 Apr 2025 13:37:51 helpers.py:102: Registered external memory region 'local_mr_0': addr=0x564543905020, rkey=2342074, size=4096
+[INFO] 03 Apr 2025 13:37:51 helpers.py:507: Created local memory region: {'name': 'local_mr_0', 'addr': 94855486263328, 'rkey': 2342074, 'lkey': 2342074, 'size': 4096}
+[INFO] 03 Apr 2025 13:37:51 helpers.py:563: Creating RDMA READ work request, remote_addr=0x559bf92ee020, rkey=2342331, length=4096
+[INFO] 03 Apr 2025 13:37:51 helpers.py:576: Posted RDMA READ request: remote_addr=0x559bf92ee020, rkey=2342331, length=4096
+[DEBUG] 03 Apr 2025 13:37:51 helpers.py:600: ✅ RDMA READ completed successfully: RDMA-MR-default
+```
+
+
 
 ## TODO list
 - Shared memory should be one large block, where RDMA memory regions are 4KB size and contiguous (done)
