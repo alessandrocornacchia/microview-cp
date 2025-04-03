@@ -4,6 +4,7 @@ obj/**
 bin/**
 .conda**
 *.pickle
+*.json
 __pycache__/**
 *.pyc
 *.log

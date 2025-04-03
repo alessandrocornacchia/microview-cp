@@ -1,3 +1,8 @@
+""" 
+Demonstrates RDMA CMID not working well with threads, the main thread seems lose control when execution 
+is suspended on get_request()
+"""
+
 import os
 import sys
 import threading

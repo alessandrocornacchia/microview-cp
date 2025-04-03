@@ -10,8 +10,8 @@ from typing import Dict, Tuple
 import ctypes
 import numpy as np
 from flask import Flask, request, jsonify
-from rdma.rdma_microview_host import QueuePairPool
-from rdma.rdma_passive import RDMAPassiveServer
+from rdma.helpers import QueuePairPool
+from rdma.rdma_cm_server import RDMAPassiveServer
 from multiprocessing import shared_memory
 from metrics import *
 
@@ -28,7 +28,7 @@ logger = logging.getLogger('MicroviewHostAgent')
 
 # This is configurable, but 800KB shared memory assumes applications with:
 #   100 pods x 100 metrics x 80 bytes
-SHM_POOL_SIZE = 800000
+SHM_POOL_SIZE = 800 * 1024
 SHM_POOL_NAME = "microview"
 DEFAULT_RDMA_DEVICE = "mlx5_1"
 

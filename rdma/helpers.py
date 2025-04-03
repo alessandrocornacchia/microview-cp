@@ -1,3 +1,12 @@
+"""
+    It provides some helper classes to deal with RDMA operations, such as a MR manager, to create or register exisitng 
+    memory within a RDMA protection domain, and a QP pool manager, to create and manage a pool of RDMA queue pairs.
+
+    At the bottom, two tests show how these helper classes can be used to connect two queue pairs and perform RDMA 
+    reads from a remote memory region.
+"""
+
+
 #!/usr/bin/env python3
 import json
 import pickle
@@ -39,7 +48,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger('RDMAPassiveServer')
+logger = logging.getLogger('RDMAHelper')  # TODO ugly! 
 
 
 class MemoryRegionManager:
@@ -58,9 +67,44 @@ class MemoryRegionManager:
         self.default_buffer_size = default_buffer_size
         self.memory_regions = {}
         
+    
+    def register_memory_region(self, name: str, addr: int, size: int) -> Dict[str, Any]:
+        """
+        Register an existing buffer with RDMA
+        
+        Args:
+            name: Name identifier for this memory region
+            addr: Address of the pre-allocated memory region
+            size: Size of the memory region
+            
+        Returns:
+            Dict containing memory region information
+        """
+        # Register with remote access flags
+        access_flags = pyverbs.enums.IBV_ACCESS_LOCAL_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ
+        
+        # Register the memory region
+        memory_region = MR(self.pd, size, access_flags, addr)
+        
+        # Store memory region info (without buffer since it's managed externally)
+        mr_info = {
+            "name": name,
+            "addr": addr,
+            "rkey": memory_region.rkey,
+            "lkey": memory_region.lkey,
+            "size": size,
+            "buffer": None,  # Physical buffer is managed externally depending if local or remote use
+            "mr": memory_region
+        }
+        
+        self.memory_regions[name] = mr_info
+        logger.info(f"Registered external memory region '{name}': addr={hex(addr)}, rkey={memory_region.rkey}, size={size}")
+        
+        return self.get_memory_region_info(name)
+
     def create_memory_region(self, name: str, size: int = None) -> Dict[str, Any]:
         """
-        Create and register a new memory region
+        Create and register a new memory region, of given name and size
         
         Args:
             name: Name identifier for this memory region
@@ -81,46 +125,30 @@ class MemoryRegionManager:
         
         # Get buffer address and register with remote access flags
         buffer_addr = buffer.ctypes.data
-        access_flags = pyverbs.enums.IBV_ACCESS_LOCAL_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ
         
         # Register the memory region
-        memory_region = MR(self.pd, size, access_flags, buffer_addr)
-        
-        # Store memory region info
-        mr_info = {
-            "name": name,
-            "addr": buffer_addr,
-            "rkey": memory_region.rkey,
-            "size": size,
-            "buffer": buffer,
-            "mr": memory_region
-        }
-        
-        self.memory_regions[name] = mr_info
-        logger.info(f"Created memory region '{name}': addr={hex(buffer_addr)}, rkey={memory_region.rkey}, size={size}")
-        
-        return {
-            "name": name,
-            "addr": buffer_addr,
-            "rkey": memory_region.rkey,
-            "size": size
-        }
+        mr_info = self.register_memory_region(name, buffer_addr, size)
+
+        # Store the buffer reference in our memory_regions dict to keep it alive
+        self.memory_regions[name]["buffer"] = buffer
+
+        return mr_info
     
     def save_memory_region_info(self, filename: str):
         """ Save memory region information to a file for debugging and sharing with clients."""
-        
         serializable_regions = {
-            name: self.get_memory_region_info(name) for name, _ in self.mr_manager.memory_regions.items()
+            name: self.get_memory_region_info(name) for name, _ in self.memory_regions.items()
         }
         # Save to json file in json format
-        with open(filename + '.json', 'w') as f:
+        with open(filename + '.json' if not filename.endswith('.json') else filename, 'w') as f:
             json.dump(serializable_regions, f, indent=2)
             logger.info(f"Saved RDMA info to JSON file: {filename}")
         # Save to pickle file
-        with open(filename + '.pickle', 'wb') as f:
+        with open(filename + '.pickle' if not filename.endswith('.pickle') else filename, 'wb') as f:
             pickle.dump(serializable_regions, f)
             logger.info(f"Saved RDMA info to pickle file: {filename}")
         
+    
     def get_memory_region_info(self, name: str) -> Optional[Dict[str, Any]]:
         """Get information about a registered memory region"""
         if name not in self.memory_regions:
@@ -131,6 +159,7 @@ class MemoryRegionManager:
             "name": mr_info["name"],
             "addr": mr_info["addr"],
             "rkey": mr_info["rkey"],
+            "lkey": mr_info["lkey"],
             "size": mr_info["size"]
         }
     
@@ -262,6 +291,22 @@ class QueuePairPool:
         logger.info(f"Created Queue Pair pool with {self.pool_size} QPs")
     
     
+    def get_qp_object(self, index: int) -> Optional[QP]:
+        """
+        Get the QP object at the specified index
+        
+        Args:
+            index: Index of the QP in the pool
+            
+        Returns:
+            QP object if found, None otherwise
+        """
+        if index < 0 or index >= len(self.qps):
+            raise ValueError(f"Queue Pair index {index} out of range (0-{len(self.qps)-1})")
+        
+        return self.qps[index]["qp"]
+    
+
     def get_qp_local_info(self, index: int) -> Dict[str, Any]:
         """
         Get information about a specific queue pair or find an available one
@@ -395,35 +440,165 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-def qp_info_from_file(filename: str) -> Dict[str, Any]:
-    """Load QP information from a file"""
-    # if extension is json
-    if filename.endswith('.json'):
-        with open(filename, 'r') as f:
-            remote_info = json.load(f)
-    # if extension is pickle
-    elif filename.endswith('.pickle'):
-        with open(filename, 'rb') as f:
-            remote_info = pickle.load(f)
-    else:
-        raise ValueError(f"Unsupported file format: {filename}")
-    logger.info(f"Loaded remote QP information from {filename}")
-    logger.debug(f"Remote QP information: {remote_info}")
-    return remote_info
 
-# Main entry point for standalone testing
+
+def perform_rdma_read(qp_pool, remote_addr, rkey, length):
+    """
+    Perform an RDMA READ operation
+    
+    Args:
+        remote_addr: Remote memory address to read from
+        rkey: Remote key for the memory region
+        length: Length of data to read (defaults to buffer_size)
+        
+    Returns:
+        The data read from remote memory
+    """
+    from pyverbs.wr import SGE, RecvWR, SendWR
+
+    # Create local buffer for RDMA operations
+    buffer = np.zeros(length, dtype=np.uint8)
+
+    # Register the memory region
+    buffer_addr = buffer.ctypes.data
+    access_flags = pyverbs.enums.IBV_ACCESS_LOCAL_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ
+
+    mr = MR(qp_pool.pd, length, access_flags, buffer_addr)
+    logger.info(f"Registered local MR: addr={hex(buffer_addr)}, lkey={mr.lkey}")
+
+    
+    # Clear local buffer before read
+    buffer.fill(0)
+    
+    try:
+        
+        logger.info(f"Creating RDMA READ work request, remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
+        # Create RDMA READ work request
+        wr = SendWR(
+            opcode=pyverbs.enums.IBV_WR_RDMA_READ,
+            num_sge=1,
+            sg=[SGE(mr.buf, mr.length, mr.lkey)],            
+        )
+        wr.set_wr_rdma(rkey, remote_addr)
+
+        # Post to QP
+        qp = qp_pool.get_qp_object(0)
+        qp.post_send(wr)
+
+        logger.info(f"Posted RDMA READ request: remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
+        
+        # Poll for completion
+        while True:
+            wc_num, wcs = qp_pool.cq.poll()
+            
+            if wc_num:
+                if wcs[0].status != pyverbs.enums.IBV_WC_SUCCESS:
+                    raise RuntimeError(f"❌ RDMA READ failed with status: {wcs[0].status}")
+                
+                content = mr.read(mr.length, 0).decode()
+                logger.info(f"✅ RDMA READ completed successfully: {content}")
+                
+                # cleanup memory region
+                mr.close()
+
+                break
+            else:
+                logger.debug("Waiting for RDMA READ completion...")
+                time.sleep(0.1)
+
+        
+        return content
+        
+    except Exception as e:
+        logger.error(f"Error performing RDMA READ: {e}")
+        raise
+
+
+
+# --------- Main entry point for  testing ------------------
+
+def test_qp_connect(args, qp_pool):
+    """"
+    Test the connection of queue pairs
+    """
+    # Save memory region info to pickle file
+    qp_pool.save_queue_pair_info(args.local_to)
+    logger.info(f"RDMA started, check {args.local_to}.json and {args.local_to}.pickle for details")
+    
+    
+    fn = input("Enter filename with remote RDMA information, or Press Enter for default: ")
+    if not fn and args.client:
+        fn = "rdma_passive_info.json"
+    if not fn and not args.client:
+        fn = "rdma_active_info.json"
+
+    # Load remote QP information from file
+    remote_info = qp_info_from_file(fn)
+    
+    # Connect to remote QP
+    for i in range(len(qp_pool.qps)):
+        try:
+            qp_pool.connect_queue_pair(i, remote_info[f"qp_{i}"])
+        except Exception as e:
+            logger.error(f"Error connecting to remote QP: {e}")
+
+
+def test_mr_read(args, qp_pool):
+    """"
+    Test a READ() operation using RDMA, with a memory region created by a passive side.
+    MR information is saved to a file for the client to use.
+    """
+    RDMA_MR_INFO_FILE = "mr_info.json"
+    
+    # Server creates default memory region
+    if not args.client:
+        mr_manager = MemoryRegionManager(qp_pool.pd, default_buffer_size=args.buffer_size)
+        mr_manager.create_memory_region("default", args.buffer_size)
+        mr_manager.save_memory_region_info(RDMA_MR_INFO_FILE)
+    
+    # both connect queue pairs
+    test_qp_connect(args, qp_pool)
+
+    # client will retrieve memory region information and issue read requests
+    if args.client:
+        # running as client for RDMA READS
+        fn = input("Enter MR filename or Press Enter to start RDMA reads...")
+        if not fn:
+            fn = RDMA_MR_INFO_FILE
+        addr, rkey, size = mr_info_from_file(fn)
+        logger.info(f"Loaded memory region info from {fn}, addr={hex(addr)}, rkey={rkey}, size={size}")
+        # Perform RDMA READ
+        data = perform_rdma_read(qp_pool, addr, rkey, size)
+        logger.info(f"Data read from remote memory: {data}")
+    else:
+        # Keep main thread alive for testing
+        try:
+            print("Waiting for RDMA reads(). Press Ctrl+C to exit.")
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Exiting RDMA server")
+            pass
+        finally:
+            mr_manager.cleanup()
+
+
 if __name__ == "__main__":
     import argparse
-    
+    # Add parent directory to path for imports
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from utils import qp_info_from_file, mr_info_from_file
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="RDMA Passive Server with QP Pool")
+    parser.add_argument("-c", "--client", action="store_true", help="Run as RDMA client")
     parser.add_argument("--qp", type=int, default=DEFAULT_QP_POOL_SIZE,
                       help=f"Size of Queue Pair pool (default: {DEFAULT_QP_POOL_SIZE})")
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE,
                       help=f"Default size of memory buffers (default: {DEFAULT_BUFFER_SIZE})")
     parser.add_argument("--rdma-device", type=str, default=DEFAULT_RDMA_DEVICE,
                         help=f"RDMA device to use (default: {DEFAULT_RDMA_DEVICE})")
-    parser.add_argument("--info-file", type=str, default="rdma_passive_info",
+    parser.add_argument("--local-to", type=str, default="rdma_passive_info",
                         help="File to save local RDMA information for other connections")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     
@@ -434,46 +609,25 @@ if __name__ == "__main__":
     if args.debug:
         logger.setLevel(logging.DEBUG)
     
-    # Create QP pool directly instead of using RDMAPassiveServer
-    logger.info(f"Starting RDMA passive server with QP pool size {args.qp}")
+    logger.info(f"Starting RDMA with QP pool size {args.qp}")
     qp_pool = None
     
     try:
         # Initialize QP pool
         qp_pool = QueuePairPool(args.rdma_device, pool_size=args.qp)
         
-        # Create default memory region
-        # mr_manager = MemoryRegionManager(qp_pool.pd, default_buffer_size=args.buffer_size)
-        # mr_manager.create_memory_region("default", args.buffer_size)
-        
-        
-        # Save memory region info to pickle file
-        qp_pool.save_queue_pair_info(args.info_file)
-        
-        logger.info(f"RDMA started, check {args.info_file}.json and {args.info_file}.pickle for details")
-        
-        fn = input("Enter filename with RDMA client information to connect: ")
-        
-        # Load remote QP information from file
-        remote_info = qp_info_from_file(fn)
-        
-        # Connect to remote QP
-        for i in range(len(qp_pool.qps)):
-            try:
-                qp_pool.connect_queue_pair(i, remote_info[f"qp_{i}"])
-            except Exception as e:
-                logger.error(f"Error connecting to remote QP: {e}")
-
+        test_mr_read(args, qp_pool)
+        # test_qp_connect(args, qp_pool) #TODO make this selection possible from commandline
                 
-        # Keep main thread alive for testing
-        print("Waiting for RDMA reads(). Press Ctrl+C to exit.")
-        while True:
-            time.sleep(1)
             
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
         logger.error(f"Error: {e}")
+         # Clean up resources
+        if qp_pool:
+            qp_pool.cleanup()
+        raise
     finally:
         # Clean up resources
         if qp_pool:
