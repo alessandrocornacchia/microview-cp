@@ -8,7 +8,7 @@ import numpy as np
 from prometheus_client import start_http_server, REGISTRY, Metric
 from defaults import *
 #from rdma.cm_collector import RDMACollectorCm
-from rdma.helpers import QueuePairPool
+from rdma.helpers import MRMetadata, OneSidedReader, QueuePairPool
 #from readers.rdma_connections import group_memory_pages_contiguous
 
 # Configure logging
@@ -174,8 +174,23 @@ class MicroView(MicroViewBase):
                 timeout=10,
             )
             response.raise_for_status()
-            logger.info("✅ Connected with host")
+            
+            # 7. Now ask for remote memory regions
+            response = requests.get(
+                f"http://{self.control_plane_url}/rdma/mrs",
+            )
+            response.raise_for_status()
+            logger.info("🔗 Connected with MicroView host")
 
+            # 8. Create RDMA client
+            remote_memory_regions = [MRMetadata(
+                mr["addr"], 
+                mr["rkey"], 
+                mr["size"], 
+                None) for mr in response.json().get("memory_regions", [])]
+            self.rdma = OneSidedReader(self.qp_pool.pd, self.qp_pool.get_qp_object(0), remote_memory_regions)
+            logger.info("💾 RDMA active reader initialized")
+            
         except Exception as e:
             logger.info(f"❌ Failed to connect with host: {e}")
             self.cleanup()
@@ -199,12 +214,6 @@ class MicroView(MicroViewBase):
             # set queue pairs
             self.connect_with_microview_host()
 
-            # TODO set local memory regions
-            ....
-
-            # TODO Here will use the one-sided RDMA reader
-            self.rdma = ...
-            
             
             logger.info("✅ MicroView collector initialized successfully")
             
@@ -215,8 +224,7 @@ class MicroView(MicroViewBase):
 
     def cleanup(self):
         """Clean up resources"""
-        if self.rdma:
-            self.rdma.cleanup()
+        super().cleanup()
         if self.qp_pool:
             self.qp_pool.cleanup()
         logger.info("MicroView collector cleaned up")

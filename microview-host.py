@@ -340,28 +340,20 @@ class MicroviewHostAgent:
         @self.app.route('/rdma/mrs', methods=['GET'])
         def get_memory_regions():
             """Get all memory regions"""
-            if not self.qp_pool:
-                return jsonify({"error": "RDMA server not running"}), 503
+            if not self.mr_mgmt:
+                return jsonify({"error": "RDMA MR not yet initialized"}), 503
                 
-            mrs = self.qp_pool.mr_manager.list_memory_regions()
+            mrs = self.mr_mgmt.list_memory_regions()
+            logger.debug(f"Returning memory regions: {mrs}")
             return jsonify({"memory_regions": mrs})
         
-        @self.app.route('/rdma/mr', methods=['POST'])
+        @self.app.route('/rdma/mrs/create', methods=['POST'])
         def create_memory_region():
             """Create a new memory region"""
-            if not self.qp_pool:
-                return jsonify({"error": "RDMA server not running"}), 503
-                
-            data = request.json
-            if not data or "name" not in data:
-                return jsonify({"error": "Missing name in request body"}), 400
-                
-            try:
-                size = data.get("size", None)
-                mr_info = self.qp_pool.mr_manager.register_memory_region(data["name"], size)
-                return jsonify({"memory_region": mr_info})
-            except Exception as e:
-                return jsonify({"error": str(e)}), 400
+            if not self.mr_mgmt:
+                return jsonify({"error": "RDMA MR not yet initialized"}), 503
+                        
+            return jsonify({"error": "Not implemented yet"}), 400
     
     
     # This is when it uses the RDMA CM abstraction to start a server
