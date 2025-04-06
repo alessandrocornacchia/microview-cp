@@ -19,14 +19,24 @@ def update_metric_value_from_ptr(ptr_address, new_value):
 
 class MetricsPage:
     """Wrapper class for a page of metrics in shared memory"""
-    def __init__(self, array, max_metrics, page_offset):
-        self.buckets = array  # Numpy array for this page
-        self.max_metrics = max_metrics  # Max metrics this page can hold
+    def __init__(self, addr, size, offset=0):
+        
+        # buffer is already in shared memory
+        # Create numpy array view for this page
+        self.metrics = np.ndarray(
+            (size,),
+            dtype=metric_dtype,
+            buffer=addr,
+            offset=offset
+        )
+        
+        self.max_metrics = size  # Max metrics this page can hold
         self.num_entries = 0  # Current number of metrics
-        self.page_offset = page_offset  # Offset in shared memory
-        # self.metrics = []  # List of metric metadata (name, etc.)
-        print(f"MetricsPage initialized with page_offset: {self.page_offset}, max_metrics: {self.max_metrics}")
+        self.page_offset = 0
+        
+        print(f"MetricsPage initialized at address: {addr + offset}.")
 
+    
     def get_value_offset_from_shm_base_addr(self, index: int) -> int:
         """
         Get the pointer to the value of a metric at the given index.
@@ -38,7 +48,7 @@ class MetricsPage:
             Pointer to the value of the metric
         """
         
-        record_offset = index * self.buckets.itemsize
+        record_offset = index * self.metrics.itemsize
         field_offset = metric_dtype.fields['value'][1]
         return self.page_offset + record_offset + field_offset
     
@@ -50,9 +60,47 @@ class MetricsPage:
         
         # Add the new metric
         new_index = self.num_entries
-        self.buckets[new_index] = (metric_name.encode('utf-8'), metric_type, initial_value)
+        self.metrics[new_index] = (metric_name.encode('utf-8'), metric_type, initial_value)
         
         # Increment the number of entries
         self.num_entries += 1
         
         return self.get_value_offset_from_shm_base_addr(new_index)
+
+
+    def get_metrics(self):
+        """
+        Get all metrics in this page.
+        
+        Returns:
+            List of tuples obtained by deserializing metrics array
+        """
+        metrics = []
+        for i in range(self.num_entries):
+            name, metric_type, value = self.metrics[i]
+            metrics.append((name.decode('utf-8'), metric_type, value))
+        return metrics
+    
+
+    @classmethod
+    def from_bytes(cls, raw_bytes, num_entries):
+        """
+        Create a MetricsPage object from raw bytes (e.g., returned by RDMA read)
+        
+        Args:
+            raw_bytes: Raw bytes from RDMA read operation
+            num_entries: Active number of entries
+        
+        Returns:
+            A new MetricsPage instance populated with data from raw_bytes
+        """
+
+        # Create a new instance
+        page = cls.__new__(cls)
+
+        # Directly create the structured array from the raw bytes
+        page.metrics = np.frombuffer(raw_bytes, dtype=metric_dtype)
+        page.max_metrics = len(page.metrics)
+        page.num_entries = num_entries
+        
+        return page

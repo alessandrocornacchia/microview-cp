@@ -12,6 +12,8 @@ DEFAULT_BUFFER_SIZE = 4096
 DEFAULT_QP_POOL_SIZE = 1
 DEFAULT_GID = 3
 DEFAULT_IB_PORT = 1
+DEFAULT_POLL_INTERVAL = 0.1  # seconds
+DEFAULT_PAGE_SIZE = 4096
 
 # Configure default logging
 logging.basicConfig(

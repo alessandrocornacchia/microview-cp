@@ -4,7 +4,7 @@ import time
 import logging
 import requests
 import numpy as np
-
+from metrics import MetricsPage
 from prometheus_client import start_http_server, REGISTRY, Metric
 from defaults import *
 #from rdma.cm_collector import RDMACollectorCm
@@ -26,7 +26,7 @@ logger = logging.getLogger('MicroviewNIC')
 class MicroViewBase(abc.ABC):
     """Abstract base class for MicroView collectors that read metrics using RDMA"""
     
-    def __init__(self, control_plane_url: str):
+    def __init__(self, control_plane_url: str, scrape_interval: int = 1):
         """
         Initialize the MicroView collector base
         
@@ -38,6 +38,8 @@ class MicroViewBase(abc.ABC):
         self.metrics_config = {}  # Configuration of metrics (types, etc.)
         self.rdma = None
         
+        self.scrape_interval = scrape_interval
+
         # Parse host and port from control plane URL
         host_parts = control_plane_url.split(':')
         self.host = host_parts[0]
@@ -46,31 +48,14 @@ class MicroViewBase(abc.ABC):
         logger.info(f"Initializing MicroView collector with control plane at {control_plane_url}")
     
     @abc.abstractmethod
-    def setup(self, num_rdma_connections: int = 1):
+    def setup(self):
         """
         Initialize the collector by fetching metrics layout and setting up RDMA
         
-        Args:
-            num_rdma_connections: Number of RDMA connections to create
         """
         pass
     
-    def get_memory_layout(self) -> Dict[str, Dict]:
-        """
-        Fetch memory layout from the control plane
-        
-        Returns:
-            Dictionary mapping microservice IDs to their metrics info
-        """
-        try:
-            response = requests.get(f"http://{self.control_plane_url}/metrics")
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Failed to fetch memory layout: {e}")
-            # Return empty dict or raise exception based on your error handling strategy
-            return {}
-
+    
     def configure_collector(self, service_id: str, *args, **kwargs):
         """Configure collector for a specific service (placeholder for future functionality)"""
         logger.info(f"Configuring collector for service {service_id}")
@@ -136,7 +121,9 @@ class MicroView(MicroViewBase):
     
     def __init__(self, control_plane_url):
         super().__init__(control_plane_url)
-        self.qp_pool = None
+        self.qp_pool = None     # Queue Pair pool, each RDMA reader will have its own QP
+        self.remote_memory_regions = None   # List of remote memory regions
+        self.control_info = None  # Control info from the control plane
 
 
     def connect_with_microview_host(self):
@@ -183,43 +170,103 @@ class MicroView(MicroViewBase):
             logger.info("🔗 Connected with MicroView host")
 
             # 8. Create RDMA client
-            remote_memory_regions = [MRMetadata(
+            self.remote_memory_regions = [MRMetadata(
                 mr["addr"], 
                 mr["rkey"], 
                 mr["size"], 
                 None) for mr in response.json().get("memory_regions", [])]
-            self.rdma = OneSidedReader(self.qp_pool.pd, self.qp_pool.get_qp_object(0), remote_memory_regions)
-            logger.info("💾 RDMA active reader initialized")
             
         except Exception as e:
             logger.info(f"❌ Failed to connect with host: {e}")
             self.cleanup()
             raise e
             
+    def configure_metric_collection(self):
+        """
+        Fetch configuration from remote side for existing metrics, then assigns to 
+        RDMA one-sided readers. 
+        
+        Returns:
+            Dictionary mapping microservice IDs to their metrics info
+        """
+        
+        try:
+            response = requests.get(f"http://{self.control_plane_url}/metrics")
+            response.raise_for_status()
+            control_info = response.json()
+            logger.debug(f"Control info: {control_info}")
+        except Exception as e:
+            logger.error(f"Failed to fetch memory layout: {e}")
+        
+        # TODO here is where we would need to decide how to group memory pages
+        # and how many readers to create. Now we just create one reader for all. 
+        # e.g., based on control_info you can see which pages are emty and which not etc.
+        # right now we only check those with metrics installed
+        if len(control_info) != len(self.remote_memory_regions):
+            raise RuntimeError("Mismatch between control info and remote memory regions")
+        active_mrs = [] # memory regions with actually metrics installed
+        for i,mr in enumerate(control_info):
+            if len(mr["pages"]) != 0:
+                active_mrs.append(self.remote_memory_regions[i])
+        
+        self.rdma = OneSidedReader(
+            self.qp_pool.pd, 
+            self.qp_pool.get_qp_object(0), 
+            active_mrs)
+        logger.info("💾 RDMA active reader initialized")
 
-    def setup(self, num_rdma_connections: int = 1):
+        return control_info
+
+    def setup(self):
         """
         Initialize the collector by fetching metrics layout and setting up RDMA.
         Assumes that the host is already initialized and all memory regions are there.
         No agreement on MRs. Static configuration is used.
         
-        Args:
-            num_rdma_connections: Number of RDMA connections to create
         """
         try:
-            # TODO decide Fetch memory layout from control plane
-            metrics_layout = self.get_memory_layout()
-            logger.info(f"Fetched memory layout with {len(metrics_layout)} microservices")
             
-            # set queue pairs
+            # setup data plane connection
             self.connect_with_microview_host()
-
+            
+            # Fetch metrics memory mapping from control plane and start readers.
+            self.control_info = self.configure_metric_collection()
             
             logger.info("✅ MicroView collector initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize MicroView collector: {e}")
             raise
+
+    
+    def start_local_scrape_loop(self):
+        """ 
+        Local metrics reading loop, should be pin to a dedicated thread ideally 
+        """
+        logger.info(f"Entering local scrape loop with scrape_interval={self.scrape_interval}, press Ctrl+C to exit")
+        try:
+            while True:
+                # execute one RDMA read operation from all active memory regions
+                results = self.rdma.execute(poll_interval=DEFAULT_POLL_INTERVAL)
+
+                # Process results using control_info
+                for i in range(len(results)):
+                    all_pages = results[i]
+                    pod_id = self.control_info[i]["pod_id"]
+                    # for each page, how many metrics are used (assumes fixed metrics size)
+                    page_occupancy = self.control_info[i]["pages"]
+                    for j in range(len(all_pages), DEFAULT_PAGE_SIZE):
+                        page = all_pages[j:j+PAGE_SIZE]
+                        mp = MetricsPage.from_bytes(page, page_occupancy[j])
+                        metrics = mp.get_metrics()
+
+                        logger.debug(f"Metrics for {pod_id}: {metrics}")
+
+                # wait until next local read 
+                time.sleep(self.scrape_interval)
+        except KeyboardInterrupt:
+            logger.info("Gracefully terminating RDMA operations")
+            self.cleanup()
 
 
     def cleanup(self):

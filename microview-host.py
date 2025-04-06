@@ -10,12 +10,13 @@ from typing import Dict, Tuple
 import ctypes
 import numpy as np
 from flask import Flask, request, jsonify
-from rdma.helpers import MemoryRegionManager, QueuePairPool
+from rdma.helpers import MemoryRegionPool, QueuePairPool
 from rdma.cm_server import RDMAPassiveServer
 from multiprocessing import shared_memory
 from metrics import *
 from utils import get_ptr_in_shm
 from defaults import *
+from pyverbs.pd import PD
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('MicroviewHostAgent')
 
+# TODO merge with defaults
 # This is configurable, but 800KB shared memory assumes applications with:
 #   100 pods x 100 metrics x 80 bytes
 SHM_POOL_SIZE = 800 * 1024
@@ -50,19 +52,16 @@ class MetricsMemoryManager(AllocationStrategy):
         Strategy that allocates one page per microservice. 
         All metrics are registered there
     """
-    
-    # Constants
-    PAGE_SIZE = 4096
         
     def __init__(self):
         
         # Calculate how many metrics fit in a page
         item_size = np.dtype(metric_dtype).itemsize
-        self.metrics_per_page = MetricsMemoryManager.PAGE_SIZE // item_size
+        self.metrics_per_page = DEFAULT_PAGE_SIZE // item_size
         logger.info(f"Each page can hold {self.metrics_per_page} metrics of size {item_size} bytes")
         
         # Calculate how many pages we can fit
-        self.max_pages = SHM_POOL_SIZE // MetricsMemoryManager.PAGE_SIZE
+        self.max_pages = SHM_POOL_SIZE // DEFAULT_PAGE_SIZE
         logger.info(f"Shared memory pool can hold {self.max_pages} pages")
         
         # Allocate shared memory for the entire application
@@ -76,34 +75,61 @@ class MetricsMemoryManager(AllocationStrategy):
         # Track which pages are allocated
         self.allocated_pages = 0
         
-        # Initialize registry
-        self.registry = {}  # Maps microservice_id to page info
+        
+        self.mr_pool = None  # Memory region management
+        self.page2pod = {}  # Maps microservice_id to page info
+        self.mr_pages = []  # Memory region layout (MR -> pages)
         self.shm_blocks = {"microview-demo": self.shm}  # For cleanup # TODO this can be avoided..
     
     
-    def _create_new_page(self, microservice_id: str) -> MetricsPage:
+    def add_rdma_memory_regions(self, pd: PD):
+        """
+        Add RDMA memory regions to the shared memory
+        """
+        # Create memory regions
+        self.mr_pool = MemoryRegionPool(pd)
+        
+        # TODO these parameters should be configurable with fallback to default value
+        if DEFAULT_RDMA_MR_SIZE % DEFAULT_PAGE_SIZE != 0:
+            raise ValueError(f"RDMA MR size {DEFAULT_RDMA_MR_SIZE} must be a multiple of page size {DEFAULT_PAGE_SIZE}")
+        
+        num_mr = SHM_POOL_SIZE // DEFAULT_RDMA_MR_SIZE
+        base_addr = self.get_shm_base_addr()
+
+        self.mr_pages = [[] for _ in range(num_mr)]
+        for i in range(num_mr):
+            mr_info = self.mr_pool.register_memory_region(
+                name=f"RDMA-MR-{i}",
+                addr=base_addr + (i * DEFAULT_RDMA_MR_SIZE),
+                size=DEFAULT_RDMA_MR_SIZE)
+    
+
+    def _create_new_page(self, pod_id: str) -> MetricsPage:
          # Check if we have pages available
         if self.allocated_pages >= self.max_pages:
             logger.error("No more shared memory pages available")
             raise ValueError("No more shared memory pages available")
         
         # Calculate page offset in the shared memory
-        page_offset = self.allocated_pages * MetricsMemoryManager.PAGE_SIZE
-        
-        # Create numpy array view for this page
-        array = np.ndarray(
-            (self.metrics_per_page,),
-            dtype=metric_dtype,
-            buffer=self.shm.buf,
-            offset=page_offset
-        )
-        
+        page_offset = self.allocated_pages * DEFAULT_PAGE_SIZE
+
         # Create metrics page wrapper
-        metrics_page = MetricsPage(array, self.metrics_per_page, page_offset)
+        metrics_page = MetricsPage(addr = self.shm.buf, 
+                                   page_offset = page_offset,
+                                   max_metrics = self.metrics_per_page)
         
-        # Register the microservice page
-        self.registry[microservice_id] = metrics_page
-                    
+        # mapping from metrics page to microservice. This is intentionally managed
+        # here and not in the MetricsPage class itself. Other strategies are indeed 
+        # posible.
+        self.page2pod[metrics_page] = pod_id
+        
+        # append the newly created page to the memory region layout
+        # NOTE this assumes that the page is aligned with the RDMA MR size,
+        # all pages are the same size and the allocation strategy is sequential
+        # i.e., fill the first MR, then the second, etc.
+        mr_idx = page_offset // DEFAULT_RDMA_MR_SIZE
+        self.mr_pages[mr_idx].append(metrics_page)
+
         # Increment allocated pages counter
         self.allocated_pages += 1
         logger.info(f"Created page at offset {page_offset} in shm {self.shm.name} for microservice '{microservice_id}'")
@@ -121,10 +147,10 @@ class MetricsMemoryManager(AllocationStrategy):
         
         try:
             # --- either we already have the page, or we we created it
-            if microservice_id not in self.registry:
+            if microservice_id not in self.page2pod:
                 metrics_page = self._create_new_page(microservice_id)
             # Get the page info for this microservice
-            metrics_page = self.registry[microservice_id]
+            metrics_page = self.page2pod[microservice_id]
             
             value_address_offset = metrics_page.add_metric(metric_name, metric_type, initial_value)    
             logger.debug(f"Allocated metric, value offset {value_address_offset} in shared memory")
@@ -151,6 +177,10 @@ class MetricsMemoryManager(AllocationStrategy):
     def cleanup(self):
         """ Cleanup shared memory and allocated pages """
         logger.info("Cleaning up shared memory and allocated pages")
+        if self.mr_pool:
+            # Unregister memory regions
+            self.mr_pool.cleanup()
+            logger.info("Unregistered RDMA memory regions")
         try:
             # Close the shared memory
             self.shm.close()
@@ -159,8 +189,8 @@ class MetricsMemoryManager(AllocationStrategy):
         except Exception as e:
             logger.error(f"Error cleaning up shared memory: {e}")
         
-        # Clear the registry
-        self.registry.clear()
+        # Clear the page2pod
+        self.page2pod.clear()
         self.allocated_pages = 0
 
 
@@ -173,7 +203,6 @@ class MicroviewHostAgent:
         self.qp_pool = None
         
         self.mem_mgmt = MetricsMemoryManager()
-        self.mr_mgmt = None
 
         self.app = Flask(__name__)
         self.setup_routes()
@@ -210,30 +239,25 @@ class MicroviewHostAgent:
             except Exception as e:
                 logger.error(f"Exception in create_metric: {str(e)}", exc_info=True)
                 return jsonify({"error": f"Failed to create metric: {str(e)}"}), 500
-
+    
         @self.app.route('/metrics', methods=['GET'])
         def get_memory_layout():
-            """
-            Return the layour with which microservices metrics are stored in shared memory
-            This endpoint provides visibility into which microservices have registered
-            and how many metrics each one has.
-            """
-            logger.debug("Received get_metrics_registry request")
             
-            # Create a serializable version of the registry
-            registry_json = {}
+            logger.debug("Received get_metrics request")
+            if not self.mem_mgmt:
+                return jsonify({"error": "RDMA memory not yet ready"}), 503
             
-            # For each microservice and its page in the registry
-            for microservice_id, metrics_page in self.mem_mgmt.registry.items():
-                # Include only the number of entries for each page
-                registry_json[microservice_id] = {
-                    "page_offset": metrics_page.page_offset,
-                    "num_entries": metrics_page.num_entries,
-                    "max_metrics": metrics_page.max_metrics
-                }
-            
-            logger.debug(f"Returning registry with {len(registry_json)} microservices")
-            return jsonify(registry_json)
+            res = []
+            for mr_id in range(len(self.mem_mgmt.mr_pages)):
+                for metrics_page in self.mem_mgmt.mr_pages[mr_id]:
+                    pod_id = self.page2pod[metrics_page]
+                    page_occupancy = metrics_page.num_entries
+                    
+                    res[mr_id] = {
+                        "pod_id": pod_id,
+                        "pages": page_occupancy,
+                    }    
+            return jsonify(res)
 
         @self.app.route('/health', methods=['GET'])
         def health_check():
@@ -340,22 +364,22 @@ class MicroviewHostAgent:
         @self.app.route('/rdma/mrs', methods=['GET'])
         def get_memory_regions():
             """Get all memory regions"""
-            if not self.mr_mgmt:
+            if not self.mem_mgmt.mr_pool:
                 return jsonify({"error": "RDMA MR not yet initialized"}), 503
                 
-            mrs = self.mr_mgmt.list_memory_regions()
+            mrs = self.mem_mgmt.mr_pool.list_memory_regions()
             logger.debug(f"Returning memory regions: {mrs}")
             return jsonify({"memory_regions": mrs})
         
         @self.app.route('/rdma/mrs/create', methods=['POST'])
         def create_memory_region():
             """Create a new memory region"""
-            if not self.mr_mgmt:
+            if not self.mem_mgmt.mr_pool:
                 return jsonify({"error": "RDMA MR not yet initialized"}), 503
                         
             return jsonify({"error": "Not implemented yet"}), 400
     
-    
+    # TODO move to separate class or delete
     # This is when it uses the RDMA CM abstraction to start a server
     # def start_rdma_server(self):
     #     logger.info(f"Starting RDMA server on port {self.rdma_port}")
@@ -385,21 +409,8 @@ class MicroviewHostAgent:
             self.qp_pool = QueuePairPool(DEFAULT_RDMA_DEVICE, pool_size=qp_pool_size)
             logger.info(f"Created QP pool with size {qp_pool_size}")
 
-            # Create memory regions
-            self.mr_mgmt = MemoryRegionManager(self.qp_pool.pd)
-            
-            # TODO these parameters should be configurable with fallback to default value
-            if DEFAULT_RDMA_MR_SIZE % MetricsMemoryManager.PAGE_SIZE != 0:
-                raise ValueError(f"RDMA MR size {DEFAULT_RDMA_MR_SIZE} must be a multiple of page size {MetricsMemoryManager.PAGE_SIZE}")
-            
-            num_mr = SHM_POOL_SIZE // DEFAULT_RDMA_MR_SIZE
-            base_addr = self.mem_mgmt.get_shm_base_addr()
-
-            for i in range(num_mr):
-                mr_info = self.mr_mgmt.register_memory_region(
-                    name=f"RDMA-MR-{i}",
-                    addr=base_addr + (i * DEFAULT_RDMA_MR_SIZE),
-                    size=DEFAULT_RDMA_MR_SIZE)
+            # Tell memory manager now can create memory regions
+            self.mem_mgmt.add_rdma_memory_regions(self.qp_pool.pd)
                         
             logger.info(f"✅ RDMA initialized correctly")
                 
@@ -429,8 +440,6 @@ class MicroviewHostAgent:
         logger.info("Cleaning up resources")
         if self.qp_pool:
             self.qp_pool.cleanup()
-        if self.mr_mgmt:
-            self.mr_mgmt.cleanup()
         if self.mem_mgmt:
             self.mem_mgmt.cleanup()
         logger.info("Cleanup completed")

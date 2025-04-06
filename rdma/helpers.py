@@ -45,7 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger('RDMAHelper')  # TODO ugly! 
 
 
-class MemoryRegionManager:
+class MemoryRegionPool:
     """
     Manages memory regions that can be accessed via RDMA
     """
@@ -463,7 +463,7 @@ class OneSidedReader:
     and in RTS (Ready to Send state)
     """
 
-    def __init__(self, pd : PD, qp: QP, remote_mrs : List[MRMetadata], scrape_interval: int = 1):
+    def __init__(self, pd : PD, qp: QP, remote_mrs : List[MRMetadata]):
         """
         Initialize the one-sided reader
         
@@ -476,7 +476,8 @@ class OneSidedReader:
         self.remote_mrs = remote_mrs
         self.n_mr = len(remote_mrs)
         self.mrm = None 
-        self.scrape_interval = scrape_interval
+        
+        logging.info(f"OneSidedReader initialized with {self.n_mr} remote memory regions: {self.remote_mrs}")
         
         # create local RDMA buffers
         self._init_local_mr()
@@ -488,39 +489,33 @@ class OneSidedReader:
         # remote MR operation. 
         # TODO probably I can send SGE at once to amortize cost of syscalls on a single QP, and also poll for completion
         """
-        self.mrm = MemoryRegionManager(self.pd)
+        self.mrm = MemoryRegionPool(self.pd)
         
         for i in range(self.n_mr):
             self.mrm.create_memory_region(f"local_mr_{i}", self.remote_mrs[i].length)
 
-
-    def start(self):
-        """ 
-        RDMA reader loop, should be pin to a dedicated thread ideally 
+    def execute(self, poll_interval):
         """
-        
-        try:
-            while True:
+        One-off execution
+        """
+        # issue RDMA reads
+        for i in range(self.n_mr):
+            self.rdma_read(i)
 
-                # issue RDMA reads
-                for i in range(self.n_mr):
-                    self.rdma_read(i)
+        time.sleep(poll_interval)  # Sleep to avoid busy waiting
 
-                time.sleep(0.1)  # Sleep to avoid busy waiting
+        # wait for completions
+        ncomp = 0
+        results = []
+        for i in range(self.n_mr):
+            res = self.poll_completion(i)
+            if res:
+                ncomp += 1
+                results.append(res)
+                logger.info(f"RDMA READ result for MR {i}: {res}")
+        logger.debug(f"Polled {ncomp} completions")
+        return results
 
-                # wait for completions
-                ncomp = 0
-                for i in range(self.n_mr):
-                    res = self.poll_completion(i)
-                    if res:
-                        ncomp += 1
-                logger.debug(f"Polled {ncomp} completions")
-
-                # wait sometime until next sleep request
-                time.sleep(self.scrape_interval)
-        except KeyboardInterrupt:
-            logger.info("Gracefully terminating RDMA operations")
-            self.cleanup()
 
     def cleanup(self):
         """Clean up local memory regions, no Queue Pairs as those are managed externally"""
@@ -583,7 +578,7 @@ class OneSidedReader:
                     raise RuntimeError(f"❌ RDMA READ failed with status: {wcs[0].status}")
                 
                 mr = self.mrm.get_memory_region(f"local_mr_{index}")
-                res = mr.read(mr.length, 0).decode()
+                res = mr.read(mr.length, 0)
                 logger.debug(f"✅ RDMA READ completed successfully: {res}")
         except Exception as e:
             logger.error(f"❌ Error polling CQ: {e}")
@@ -714,7 +709,7 @@ def test_mr_read(args, qp_pool):
     
     # Server creates default memory region
     if not args.client:
-        mr_manager = MemoryRegionManager(qp_pool.pd, default_buffer_size=args.buffer_size)
+        mr_manager = MemoryRegionPool(qp_pool.pd, default_buffer_size=args.buffer_size)
         mr_manager.create_memory_region("default", args.buffer_size)
         mr_manager.save_memory_region_info(RDMA_MR_INFO_FILE)
     
@@ -754,7 +749,7 @@ def test_one_sided_reader(args, qp_pool):
     
     # Server creates default memory region
     if not args.client:
-        mr_manager = MemoryRegionManager(qp_pool.pd, default_buffer_size=args.buffer_size)
+        mr_manager = MemoryRegionPool(qp_pool.pd, default_buffer_size=args.buffer_size)
         mr_manager.create_memory_region("default", args.buffer_size)
         mr_manager.save_memory_region_info(RDMA_MR_INFO_FILE)
     
