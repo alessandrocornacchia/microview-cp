@@ -109,11 +109,14 @@ class MicroViewBase(abc.ABC):
         
         return prom_metrics
     
-    def __del__(self):
+    def cleanup(self):
         """Clean up resources"""
         if self.rdma:
             self.rdma.cleanup()
-
+    
+    def __del__(self):
+        """Clean up resources"""
+        self.cleanup()
 
 
 class MicroView(MicroViewBase):
@@ -152,6 +155,8 @@ class MicroView(MicroViewBase):
 
             # 5. Connect local QP to remote QP in pairs
             for i,qp_info in enumerate(remote_qp_info):
+                if qp_info['in_use']:
+                    logger.warning(f"⚠️ Trying to connect to QP {i} already in use")
                 self.qp_pool.connect_queue_pair(i, qp_info)
 
             # 6. Ask remote control plane to connect all
@@ -169,7 +174,7 @@ class MicroView(MicroViewBase):
             response.raise_for_status()
             logger.info("🔗 Connected with MicroView host")
 
-            # 8. Create RDMA client
+            # 8. Create local buffers, one for each remote MR
             self.remote_memory_regions = [MRMetadata(
                 mr["addr"], 
                 mr["rkey"], 
@@ -193,19 +198,20 @@ class MicroView(MicroViewBase):
         try:
             response = requests.get(f"http://{self.control_plane_url}/metrics")
             response.raise_for_status()
-            control_info = response.json()
-            logger.debug(f"Control info: {control_info}")
+            self.control_info = response.json()
+            logger.debug(f"Control info: {self.control_info}")
         except Exception as e:
             logger.error(f"Failed to fetch memory layout: {e}")
         
-        # TODO here is where we would need to decide how to group memory pages
-        # and how many readers to create. Now we just create one reader for all. 
-        # e.g., based on control_info you can see which pages are emty and which not etc.
-        # right now we only check those with metrics installed
-        if len(control_info) != len(self.remote_memory_regions):
+        # TODO here is where we would need to decide how many readers to create
+        # and how to group memory pages. Now we just create one reader for all. 
+
+        if len(self.control_info) != len(self.remote_memory_regions):
             raise RuntimeError("Mismatch between control info and remote memory regions")
-        active_mrs = [] # memory regions with actually metrics installed
-        for i,mr in enumerate(control_info):
+        
+        # filter out empty memory regions
+        active_mrs = []
+        for i,mr in enumerate(self.control_info):
             if len(mr["pages"]) != 0:
                 active_mrs.append(self.remote_memory_regions[i])
         
@@ -214,8 +220,6 @@ class MicroView(MicroViewBase):
             self.qp_pool.get_qp_object(0), 
             active_mrs)
         logger.info("💾 RDMA active reader initialized")
-
-        return control_info
 
     def setup(self):
         """
@@ -228,9 +232,6 @@ class MicroView(MicroViewBase):
             
             # setup data plane connection
             self.connect_with_microview_host()
-            
-            # Fetch metrics memory mapping from control plane and start readers.
-            self.control_info = self.configure_metric_collection()
             
             logger.info("✅ MicroView collector initialized successfully")
             
@@ -249,18 +250,25 @@ class MicroView(MicroViewBase):
                 # execute one RDMA read operation from all active memory regions
                 results = self.rdma.execute(poll_interval=DEFAULT_POLL_INTERVAL)
 
-                # Process results using control_info
+                # Loop over memory regions
                 for i in range(len(results)):
-                    all_pages = results[i]
-                    pod_id = self.control_info[i]["pod_id"]
-                    # for each page, how many metrics are used (assumes fixed metrics size)
-                    page_occupancy = self.control_info[i]["pages"]
-                    for j in range(len(all_pages), DEFAULT_PAGE_SIZE):
-                        page = all_pages[j:j+PAGE_SIZE]
-                        mp = MetricsPage.from_bytes(page, page_occupancy[j])
+                    # this is now one MR
+                    data_region = results[i]
+                    # this is the corresponding control information
+                    control_region = self.control_info[i]
+                    
+                    # Loop over pages in the memory region
+                    for j in range(len(control_region)):
+                        pod_id = control_region["pod_id"]
+                        page_occupancy = control_region["pages"]
+                        
+                        # NOTE assumes fixed page size
+                        page_bytes = data_region[j*DEFAULT_PAGE_SIZE:(j+1)*DEFAULT_PAGE_SIZE]   
+                        
+                        mp = MetricsPage.from_bytes(page_bytes, page_occupancy)
                         metrics = mp.get_metrics()
 
-                        logger.debug(f"Metrics for {pod_id}: {metrics}")
+                        logger.debug(f"📈 Metrics for {pod_id}: {metrics}")
 
                 # wait until next local read 
                 time.sleep(self.scrape_interval)
@@ -345,14 +353,15 @@ if __name__ == "__main__":
         try:
             # Create a MicroView collector instance
             uview = MicroView("localhost:5000")
-
-            # sleep for some time to let services start and register thei metrics with microview agent 
-            time.sleep(1)
             
-            uview.connect_with_microview_host()
+            # Set up the collection process
+            uview.setup()
 
-            # Set up the collector with 1 RDMA connection (i.e., 1 Queue Pair)
-            #uview.setup(num_rdma_connections=1)
+            input("Waiting for metrics control region. Press Enter to continue...")
+            
+            # Fetch metrics memory mapping from control plane and start readers.
+            uview.configure_metric_collection()
+            
             
             logger.info("MicroView setup test passed")
             

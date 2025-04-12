@@ -14,7 +14,7 @@ from rdma.helpers import MemoryRegionPool, QueuePairPool
 from rdma.cm_server import RDMAPassiveServer
 from multiprocessing import shared_memory
 from metrics import *
-from utils import get_ptr_in_shm
+from utils import peek_shared_memory
 from defaults import *
 from pyverbs.pd import PD
 
@@ -75,11 +75,19 @@ class MetricsMemoryManager(AllocationStrategy):
         # Track which pages are allocated
         self.allocated_pages = 0
         
+        #TODO all this must be parameteric
+        self.num_mr = SHM_POOL_SIZE // DEFAULT_RDMA_MR_SIZE
         
-        self.mr_pool = None  # Memory region management
-        self.page2pod = {}  # Maps microservice_id to page info
-        self.mr_pages = []  # Memory region layout (MR -> pages)
-        self.shm_blocks = {"microview-demo": self.shm}  # For cleanup # TODO this can be avoided..
+        # Memory region pool
+        self.mr_pool = None  
+        # Maps pod_id to control info of page
+        self.page2pod : Dict[MetricsPage, str] = {}  
+        # Maps pod_id to list of pages
+        self.pod2pages: Dict[str, list[MetricsPage]] = {}
+        # Memory region layout (MR -> pages)
+        self.mr_pages = [[] for _ in range(self.num_mr)]
+        # TODO unused for single shared memory segment
+        self.shm_blocks = {"microview-demo": self.shm}  
     
     
     def add_rdma_memory_regions(self, pd: PD):
@@ -93,11 +101,9 @@ class MetricsMemoryManager(AllocationStrategy):
         if DEFAULT_RDMA_MR_SIZE % DEFAULT_PAGE_SIZE != 0:
             raise ValueError(f"RDMA MR size {DEFAULT_RDMA_MR_SIZE} must be a multiple of page size {DEFAULT_PAGE_SIZE}")
         
-        num_mr = SHM_POOL_SIZE // DEFAULT_RDMA_MR_SIZE
         base_addr = self.get_shm_base_addr()
 
-        self.mr_pages = [[] for _ in range(num_mr)]
-        for i in range(num_mr):
+        for i in range(self.num_mr):
             mr_info = self.mr_pool.register_memory_region(
                 name=f"RDMA-MR-{i}",
                 addr=base_addr + (i * DEFAULT_RDMA_MR_SIZE),
@@ -113,31 +119,47 @@ class MetricsMemoryManager(AllocationStrategy):
         # Calculate page offset in the shared memory
         page_offset = self.allocated_pages * DEFAULT_PAGE_SIZE
 
-        # Create metrics page wrapper
-        metrics_page = MetricsPage(addr = self.shm.buf, 
-                                   page_offset = page_offset,
-                                   max_metrics = self.metrics_per_page)
+        # Create metrics page object
+        metrics_page = MetricsPage(buffer = self.shm.buf, 
+                                   size = self.metrics_per_page,
+                                   offset = page_offset)
         
-        # mapping from metrics page to microservice. This is intentionally managed
-        # here and not in the MetricsPage class itself. Other strategies are indeed 
-        # posible.
         self.page2pod[metrics_page] = pod_id
+        self.pod2pages.setdefault(pod_id, []).append(metrics_page)
         
         # append the newly created page to the memory region layout
         # NOTE this assumes that the page is aligned with the RDMA MR size,
         # all pages are the same size and the allocation strategy is sequential
         # i.e., fill the first MR, then the second, etc.
         mr_idx = page_offset // DEFAULT_RDMA_MR_SIZE
+        logger.debug(f"Adding page to memory region {mr_idx} at offset {page_offset}")
         self.mr_pages[mr_idx].append(metrics_page)
 
         # Increment allocated pages counter
         self.allocated_pages += 1
-        logger.info(f"Created page at offset {page_offset} in shm {self.shm.name} for microservice '{microservice_id}'")
+        logger.info(f"Created page at offset {page_offset} in shm {self.shm.name} for microservice '{pod_id}'")
 
         return metrics_page
 
-    
-    def allocate_metric(self, microservice_id: str, metric_name: str, metric_type: bool, initial_value: float) -> Tuple[str, int]:
+
+    def get_page_for_pod(self, pod_id: str) -> MetricsPage:
+        """
+        Returns first non full page for this pod_id, or None if no page is available (i.e., all full)
+        """
+        if pod_id not in self.pod2pages:
+            return None
+        
+        # Get the list of pages for this pod
+        pages = self.pod2pages[pod_id]
+        
+        # Check if any page is available
+        for page in pages:
+            if not page.is_full():
+                return page
+        
+        return None
+
+    def allocate_metric(self, pod_id: str, metric_name: str, metric_type: bool, initial_value: float) -> Tuple[str, int]:
         """
         Allocate a new metric for a microservice
         
@@ -146,17 +168,16 @@ class MetricsMemoryManager(AllocationStrategy):
         """
         
         try:
-            # --- either we already have the page, or we we created it
-            if microservice_id not in self.page2pod:
-                metrics_page = self._create_new_page(microservice_id)
-            # Get the page info for this microservice
-            metrics_page = self.page2pod[microservice_id]
+            # either we already have the page, or we we created it
+            metrics_page = self.get_page_for_pod(pod_id)
+            if not metrics_page:
+                metrics_page = self._create_new_page(pod_id)
             
             value_address_offset = metrics_page.add_metric(metric_name, metric_type, initial_value)    
             logger.debug(f"Allocated metric, value offset {value_address_offset} in shared memory")
 
         except:
-            logger.error(f"Error registering metric {metric_name} for microservice {microservice_id}")
+            logger.error(f"Error registering metric {metric_name} for microservice {pod_id}")
             raise
         
         return value_address_offset
@@ -171,31 +192,31 @@ class MetricsMemoryManager(AllocationStrategy):
     
     def get_shm_base_addr(self) -> int:
         """ Get the base address of the shared memory segment """
-        return get_ptr_in_shm(self.shm, 0)
+        return peek_shared_memory(self.shm, 0)
 
     
     def cleanup(self):
         """ Cleanup shared memory and allocated pages """
-        logger.info("Cleaning up shared memory and allocated pages")
         if self.mr_pool:
             # Unregister memory regions
             self.mr_pool.cleanup()
-            logger.info("Unregistered RDMA memory regions")
         try:
             # Close the shared memory
+            logger.debug(f"Cleaning shared memory {self.shm.name}")
             self.shm.close()
             self.shm.unlink()
-            logger.info(f"Shared memory {self.shm.name} cleaned up")
         except Exception as e:
             logger.error(f"Error cleaning up shared memory: {e}")
         
         # Clear the page2pod
         self.page2pod.clear()
+        # Clear the pod2pages
+        self.pod2pages.clear()
         self.allocated_pages = 0
 
 
 class MicroviewHostAgent:
-    def __init__(self, start_rdma: bool = False, rdma_port: str = "18515", host: str = "0.0.0.0", port: int = 5000):
+    def __init__(self, start_rdma: bool = False, host: str = "0.0.0.0", port: int = 5000):
         
         self.start_rdma = start_rdma    # useful for debug
         self.host = host
@@ -206,8 +227,7 @@ class MicroviewHostAgent:
 
         self.app = Flask(__name__)
         self.setup_routes()
-        
-        logger.info(f"MicroviewHostAgent initialized with RDMA port {rdma_port} and HTTP port {port}")
+
 
     def setup_routes(self):
         @self.app.route('/metrics', methods=['POST'])
@@ -230,7 +250,7 @@ class MicroviewHostAgent:
                     metric_type,
                     float(data['value'])
                 )
-                logger.info(f"Created metric '{data['name']}' for microservice '{data['microservice_id']}': shm_name={self.mem_mgmt.shm.name}, index={addr_offset}")
+                logger.info(f"Created metric '{data['name']}' for pod '{data['microservice_id']}': shm_name={self.mem_mgmt.shm.name}, value_field_offset={addr_offset}")
                 return jsonify({"shm_name": self.mem_mgmt.shm.name, "addr": addr_offset})
             
             except ValueError as e:
@@ -242,21 +262,26 @@ class MicroviewHostAgent:
     
         @self.app.route('/metrics', methods=['GET'])
         def get_memory_layout():
-            
-            logger.debug("Received get_metrics request")
             if not self.mem_mgmt:
                 return jsonify({"error": "RDMA memory not yet ready"}), 503
-            
+            # TODO this logic should be moved to the memory manager, it's get_control_region logic...and correspondigly, it can be used
+            # by the microview nic.
             res = []
+            # iterate over MRs
             for mr_id in range(len(self.mem_mgmt.mr_pages)):
+                control_region = []
+                # iterate over pages in the MR
+                logger.debug(f"Memory region {mr_id} has {len(self.mem_mgmt.mr_pages[mr_id])} pages")
                 for metrics_page in self.mem_mgmt.mr_pages[mr_id]:
-                    pod_id = self.page2pod[metrics_page]
+                    pod_id = self.mem_mgmt.page2pod[metrics_page]
                     page_occupancy = metrics_page.num_entries
-                    
-                    res[mr_id] = {
+                    # return control-info to the caller   
+                    control_region.append({
                         "pod_id": pod_id,
                         "pages": page_occupancy,
-                    }    
+                    })
+                res.append(control_region)
+
             return jsonify(res)
 
         @self.app.route('/health', methods=['GET'])
@@ -400,6 +425,10 @@ class MicroviewHostAgent:
     
     def _init_rdma(self, qp_pool_size=DEFAULT_QP_POOL_SIZE):
         
+        if not self.start_rdma:
+            logger.info("RDMA server not started. Set start_rdma flag to True")
+            return
+
         # Add API routes for controlling the RDMA server
         self._setup_rdma_control_routes()
         
@@ -425,8 +454,7 @@ class MicroviewHostAgent:
     
     def start(self):
         try:
-            if self.start_rdma:
-                self._init_rdma()
+            self._init_rdma()
             logger.info(f"Starting REST API on {self.host}:{self.api_port}")
             self.app.run(host=self.host, port=self.api_port)
         except KeyboardInterrupt:
@@ -449,7 +477,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Microview Host Agent")
-    parser.add_argument("--rdma-port", default="18515", help="RDMA server port")
+    parser.add_argument("--rdma", action="store_true", help="Enable RDMA server")
     parser.add_argument("--host", default="0.0.0.0", help="API host")
     parser.add_argument("--port", type=int, default=5000, help="API port")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -461,15 +489,10 @@ if __name__ == "__main__":
         logger.debug("Debug logging enabled")
 
     agent = MicroviewHostAgent(
-        start_rdma=True,
-        rdma_port=args.rdma_port,
+        start_rdma=args.rdma,
         host=args.host,
         port=args.port
     )
 
-    try:
-        agent.start()
-    except KeyboardInterrupt:
-        logger.info("Exiting due to keyboard interrupt")
-    finally:
-        agent.cleanup()
+    agent.start()
+    

@@ -1,5 +1,7 @@
 import numpy as np
 import ctypes
+from defaults import default_logger
+from utils import get_ptr_to_shmbuf
 
 # Import metric_dtype definition from shared_memory_app.py
 metric_dtype = np.dtype([
@@ -19,25 +21,25 @@ def update_metric_value_from_ptr(ptr_address, new_value):
 
 class MetricsPage:
     """Wrapper class for a page of metrics in shared memory"""
-    def __init__(self, addr, size, offset=0):
+    def __init__(self, buffer, size, offset=0):
         
-        # buffer is already in shared memory
-        # Create numpy array view for this page
+        # buffer is already in shared memory, create numpy array view for the portion of shared memory 
         self.metrics = np.ndarray(
             (size,),
             dtype=metric_dtype,
-            buffer=addr,
+            buffer=buffer,
             offset=offset
         )
         
+        self.addr = get_ptr_to_shmbuf(buffer)
         self.max_metrics = size  # Max metrics this page can hold
         self.num_entries = 0  # Current number of metrics
         self.page_offset = 0
         
-        print(f"MetricsPage initialized at address: {addr + offset}.")
+        default_logger.info(f"MetricsPage initialized at address: {self.addr + offset}.")
 
     
-    def get_value_offset_from_shm_base_addr(self, index: int) -> int:
+    def get_offset_to_value_field(self, index: int) -> int:
         """
         Get the pointer to the value of a metric at the given index.
         
@@ -65,7 +67,7 @@ class MetricsPage:
         # Increment the number of entries
         self.num_entries += 1
         
-        return self.get_value_offset_from_shm_base_addr(new_index)
+        return self.get_offset_to_value_field(new_index)
 
 
     def get_metrics(self):
@@ -80,6 +82,16 @@ class MetricsPage:
             name, metric_type, value = self.metrics[i]
             metrics.append((name.decode('utf-8'), metric_type, value))
         return metrics
+    
+    
+    def is_full(self):
+        """
+        Check if the page is full.
+        
+        Returns:
+            True if the page is full, False otherwise
+        """
+        return self.num_entries >= self.max_metrics
     
 
     @classmethod

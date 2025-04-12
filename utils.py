@@ -6,10 +6,20 @@ import pickle
 from typing import Any, Dict
 
 
-def get_ptr_in_shm(shm, offset = 0):
-    """ Maps the value pointer to the process memory space, using offset from the base address of the shared memory
-    in the process virtual address space."""
+def peek_shared_memory(shm : shared_memory.SharedMemory, offset : int = 0):
+    """
+    Returns pointer to the memory address of the shared memory buffer, plus an optional offset.
+    """
     shm_base_addr = ctypes.addressof(ctypes.c_char.from_buffer(shm.buf))
+    # print(f"Shared memory base address: {int(shm_base_addr)}, {hex(shm_base_addr)}")
+    # print(f"Shared memory offset: {offset}")
+    return shm_base_addr + offset
+
+def get_ptr_to_shmbuf(buf : memoryview, offset : int = 0):
+    """ 
+    Returns a pointer to the memory address of a memory view object, plus an optional offset.
+    """
+    shm_base_addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
     # print(f"Shared memory base address: {int(shm_base_addr)}, {hex(shm_base_addr)}")
     # print(f"Shared memory offset: {offset}")
     return shm_base_addr + offset

@@ -176,6 +176,7 @@ class MemoryRegionPool:
         """Close and clean up all memory regions"""
         for name, mr_info in list(self.memory_regions.items()):
             try:
+                logger.debug(f"Cleaning up RDMA memory region '{name}'")
                 mr_info["mr"].close()
                 del self.memory_regions[name]
             except Exception as e:
