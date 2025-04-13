@@ -3,11 +3,12 @@ import ctypes
 from defaults import default_logger
 from utils import get_ptr_to_shmbuf
 
-# Import metric_dtype definition from shared_memory_app.py
+
+# 64B metrics envelope
 metric_dtype = np.dtype([
-    ('name', 'S64'),    # metric name
-    ('type', np.bool),  # 0 counter, 1 gauge
-    ('value', np.float64),
+    ('name', 'S55'),    # metric name, 55B
+    ('type', np.bool),  # 0 counter, 1 gauge, 1B
+    ('value', np.float64),  # metric value, 8B
 ], align=True)
 
 
@@ -39,15 +40,15 @@ class MetricsPage:
         default_logger.info(f"MetricsPage initialized at address: {self.addr + offset}.")
 
     
-    def get_offset_to_value_field(self, index: int) -> int:
+    def get_value_field_relative_addr(self, index: int) -> int:
         """
-        Get the pointer to the value of a metric at the given index.
+        Get the address to the value of a metric at the given index.
         
         Args:
             index: Index of the metric
         
         Returns:
-            Pointer to the value of the metric
+            Pointer to the value of the metric, relative to the buffer address
         """
         
         record_offset = index * self.metrics.itemsize
@@ -62,12 +63,13 @@ class MetricsPage:
         
         # Add the new metric
         new_index = self.num_entries
+        # Tuple (name, type, value)
         self.metrics[new_index] = (metric_name.encode('utf-8'), metric_type, initial_value)
         
         # Increment the number of entries
         self.num_entries += 1
         
-        return self.get_offset_to_value_field(new_index)
+        return self.get_value_field_relative_addr(new_index)
 
 
     def get_metrics(self):
@@ -109,6 +111,9 @@ class MetricsPage:
 
         # Create a new instance
         page = cls.__new__(cls)
+
+        print(f"Page bytes: {len(raw_bytes)}, Element size : {metric_dtype.itemsize}, Num entries: {num_entries}")
+
 
         # Directly create the structured array from the raw bytes
         page.metrics = np.frombuffer(raw_bytes, dtype=metric_dtype)

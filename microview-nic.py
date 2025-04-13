@@ -126,7 +126,7 @@ class MicroView(MicroViewBase):
         super().__init__(control_plane_url)
         self.qp_pool = None     # Queue Pair pool, each RDMA reader will have its own QP
         self.remote_memory_regions = None   # List of remote memory regions
-        self.control_info = None  # Control info from the control plane
+        self.control_info : List[List[Dict]] = None  # Control info from the control plane
 
 
     def connect_with_microview_host(self):
@@ -212,7 +212,7 @@ class MicroView(MicroViewBase):
         # filter out empty memory regions
         active_mrs = []
         for i,mr in enumerate(self.control_info):
-            if len(mr["pages"]) != 0:
+            if len(mr) != 0:
                 active_mrs.append(self.remote_memory_regions[i])
         
         self.rdma = OneSidedReader(
@@ -259,12 +259,16 @@ class MicroView(MicroViewBase):
                     
                     # Loop over pages in the memory region
                     for j in range(len(control_region)):
-                        pod_id = control_region["pod_id"]
-                        page_occupancy = control_region["pages"]
+                        pod_id = control_region[j]["pod_id"]
+                        page_occupancy = control_region[j]["pages"]
                         
                         # NOTE assumes fixed page size
                         page_bytes = data_region[j*DEFAULT_PAGE_SIZE:(j+1)*DEFAULT_PAGE_SIZE]   
                         
+                        logger.debug(f"📊 Reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
+                        logger.debug(f"📊 Page bytes: {len(page_bytes)}")
+                        logger.debug(f"📊 Page bytes decoded: {page_bytes.decode('utf-8')[:100]}")
+                                    
                         mp = MetricsPage.from_bytes(page_bytes, page_occupancy)
                         metrics = mp.get_metrics()
 
@@ -362,12 +366,26 @@ if __name__ == "__main__":
             # Fetch metrics memory mapping from control plane and start readers.
             uview.configure_metric_collection()
             
-            
             logger.info("MicroView setup test passed")
             
+            return uview
         except Exception as e:
             logger.error(f"MicroView setup test failed: {e}")
+            raise e
 
+    # -----------
+    def test_microview_read():
+        """Test function to verify MicroView read operation"""
+        try:
+            
+            uview = test_microview_setup()
+            
+            # Start local scrape loop
+            uview.start_local_scrape_loop()
+            
+        except Exception as e:
+            logger.error(f"MicroView read test failed: {e}")
+            raise e
     
     # -----------
     def test_with_prometheus(): 

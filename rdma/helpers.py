@@ -15,7 +15,7 @@ import sys
 import os
 import time
 import threading
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 import logging
 
@@ -241,6 +241,7 @@ class QueuePairPool:
             logger.error(f"Error initializing RDMA context: {e}")
             raise
     
+    
     def _create_qp_pool(self):
         """Create a pool of Queue Pairs"""
         for i in range(self.pool_size):
@@ -296,7 +297,7 @@ class QueuePairPool:
         logger.info(f"Created Queue Pair pool with {self.pool_size} QPs")
     
     
-    def get_qp_object(self, index: int) -> Optional[QP]:
+    def get_qp_object(self, index: int) -> Tuple[QP,CQ]:
         """
         Get the QP object at the specified index
         
@@ -305,11 +306,12 @@ class QueuePairPool:
             
         Returns:
             QP object if found, None otherwise
+            CQ object
         """
         if index < 0 or index >= len(self.qps):
             raise ValueError(f"Queue Pair index {index} out of range (0-{len(self.qps)-1})")
         
-        return self.qps[index]["qp"]
+        return self.qps[index]["qp"], self.cq
     
 
     def get_qp_local_info(self, index: int) -> Dict[str, Any]:
@@ -368,8 +370,19 @@ class QueuePairPool:
         
         # Transition to RTS (Ready to Send) state
         try:    
-            logger.info(f"Connecting to remote QP: {remote_qp_num}, GID: {remote_gid}")
             
+            # Get the QP object
+            local_qp = self.qps[index]
+            
+            # check if Queue Pair is already in use, if yes reset state
+            if local_qp["in_use"]:
+                logger.warning(f"⚠️ Queue Pair #{index} is already in use")
+                return False
+
+            qp = local_qp["qp"] 
+
+            logger.info(f"Connecting to remote QP: {remote_qp_num}, GID: {remote_gid}")
+
             # Create Global Route object
             gr = GlobalRoute(dgid=remote_gid, sgid_index=self.gid_index)
 
@@ -387,9 +400,8 @@ class QueuePairPool:
             qa.max_dest_rd_atomic = 1
             qa.qp_access_flags = pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ | pyverbs.enums.IBV_ACCESS_LOCAL_WRITE
             
+
             # Change QP state to RTS
-            local_qp = self.qps[index]
-            qp = local_qp["qp"] #   Get the QP object
             qp.to_rts(qa)
             
             # Cache the QP info of the remote QP is trying to connect to here
@@ -464,16 +476,22 @@ class OneSidedReader:
     and in RTS (Ready to Send state)
     """
 
-    def __init__(self, pd : PD, qp: QP, remote_mrs : List[MRMetadata]):
+    def __init__(self, pd : PD, queues: Tuple[QP,CQ], remote_mrs : List[MRMetadata]):
         """
         Initialize the one-sided reader
         
         Args:
-            qp: Queue Pair object to use for RDMA operations
+            pd: Protection Domain to use for memory registration
+            queues: Queue Pair object to use for RDMA operations, and Completion Queue
             remote_mr: Remote memory region metadata
         """
         self.pd = pd
-        self.qp = qp
+        if not queues[0]:
+            raise ValueError("Provide a Queue Pair")
+        if not queues[1]:
+            raise ValueError("Provide a Completion Queue")
+        self.qp = queues[0]
+        self.cq = queues[1]
         self.remote_mrs = remote_mrs
         self.n_mr = len(remote_mrs)
         self.mrm = None 
@@ -513,7 +531,7 @@ class OneSidedReader:
             if res:
                 ncomp += 1
                 results.append(res)
-                logger.info(f"RDMA READ result for MR {i}: {res}")
+                # logger.info(f"RDMA READ result for MR {i}: {res}")
         logger.debug(f"Polled {ncomp} completions")
         return results
 
@@ -553,8 +571,8 @@ class OneSidedReader:
             wr.set_wr_rdma(rkey, remote_addr)
 
             # Post to QP
-            qp = qp_pool.get_qp_object(0)
-            qp.post_send(wr)
+            # qp = qp_pool.get_qp_object(0)
+            self.qp.post_send(wr)
 
             logger.info(f"Posted RDMA READ request: remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
             
@@ -571,7 +589,7 @@ class OneSidedReader:
         
         try:
             # Poll for completion
-            wc_num, wcs = qp_pool.cq.poll()
+            wc_num, wcs = self.cq.poll()
         
             # if there is some content return, else None
             if wc_num:
@@ -589,16 +607,15 @@ class OneSidedReader:
 
 
 
-# Handler for graceful termination
-def signal_handler(sig, frame):
-    logger.info("Received signal to terminate")
-    sys.exit(0)
+# # Handler for graceful termination
+# def signal_handler(sig, frame):
+#     logger.info("Received signal to terminate")
+#     sys.exit(0)
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+# signal.signal(signal.SIGINT, signal_handler)
+# signal.signal(signal.SIGTERM, signal_handler)
 
-
-
+# TODO move all this to a separate test file
 
 def perform_rdma_read(qp_pool, remote_addr, rkey, length):
     """

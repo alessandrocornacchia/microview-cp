@@ -190,15 +190,18 @@ if __name__ == "__main__":
         latency_metric = client.create_metric("http_request_latency", True, 0.0)
         
         # Update the metrics 10 times
-        for i in range(10):
+        i = 0
+        while True:
             requests_metric.update_value(i)
             latency_metric.update_value(i * 0.1)
-            
+            i += 1
+
             logger.info(f"Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
             
             import time
             time.sleep(10)
-            
+    except KeyboardInterrupt:            
+        pass
     finally:
         # Clean up
         client.close()
