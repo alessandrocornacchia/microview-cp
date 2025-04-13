@@ -64,7 +64,7 @@ class MetricsPage:
         # Add the new metric
         new_index = self.num_entries
         # Tuple (name, type, value)
-        self.metrics[new_index] = (metric_name.encode('utf-8'), metric_type, initial_value)
+        self.metrics[new_index] = (metric_name, metric_type, initial_value)
         
         # Increment the number of entries
         self.num_entries += 1
@@ -82,7 +82,7 @@ class MetricsPage:
         metrics = []
         for i in range(self.num_entries):
             name, metric_type, value = self.metrics[i]
-            metrics.append((name.decode('utf-8'), metric_type, value))
+            metrics.append((name, metric_type, value))
         return metrics
     
     

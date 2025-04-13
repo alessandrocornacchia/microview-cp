@@ -122,8 +122,8 @@ class MicroViewBase(abc.ABC):
 class MicroView(MicroViewBase):
     """Standard implementation of MicroView collector"""
     
-    def __init__(self, control_plane_url):
-        super().__init__(control_plane_url)
+    def __init__(self, control_plane_url: str, scrape_interval: int = 1):
+        super().__init__(control_plane_url, scrape_interval)
         self.qp_pool = None     # Queue Pair pool, each RDMA reader will have its own QP
         self.remote_memory_regions = None   # List of remote memory regions
         self.control_info : List[List[Dict]] = None  # Control info from the control plane
@@ -267,7 +267,7 @@ class MicroView(MicroViewBase):
                         
                         logger.debug(f"📊 Reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
                         logger.debug(f"📊 Page bytes: {len(page_bytes)}")
-                        logger.debug(f"📊 Page bytes decoded: {page_bytes.decode('utf-8')[:100]}")
+                        # logger.debug(f"📊 Page bytes decoded: {page_bytes.decode('utf-8')[:100]}")
                                     
                         mp = MetricsPage.from_bytes(page_bytes, page_occupancy)
                         metrics = mp.get_metrics()
@@ -325,11 +325,11 @@ class MicroView(MicroViewBase):
 #             raise
 
 
-def run_test(name):
+def run_test(name, args):
     if hasattr(__import__(__name__), name):
         test = getattr(__import__(__name__), name)
         logger.info(f"Running test function: {test.__name__}")
-        test()
+        test(args)
     else:
         logger.error(f"Test function {name} not found")
 
@@ -340,7 +340,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MicroView NIC Collector")
     parser.add_argument("--control-plane", required=True, help="Control plane URL")
     parser.add_argument("--port", type=int, default=8000, help="Prometheus HTTP server port")
-    parser.add_argument("--connections", type=int, default=1, help="Number of RDMA connections")
+    parser.add_argument("--scrape-interval", "-i", type=int, default=1, help="Local scrape interval in seconds")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--test", type=str, help="Run test function")
 
@@ -352,11 +352,12 @@ if __name__ == "__main__":
 
     
     ## --------- quick tests -----------
-    def test_microview_setup():
+    def test_microview_setup(args):
         """Test function to verify MicroView setup"""
         try:
             # Create a MicroView collector instance
-            uview = MicroView("localhost:5000")
+            uview = MicroView("localhost:5000", scrape_interval=args.scrape_interval)
+            
             
             # Set up the collection process
             uview.setup()
@@ -374,11 +375,11 @@ if __name__ == "__main__":
             raise e
 
     # -----------
-    def test_microview_read():
+    def test_microview_read(args):
         """Test function to verify MicroView read operation"""
         try:
             
-            uview = test_microview_setup()
+            uview = test_microview_setup(args)
             
             # Start local scrape loop
             uview.start_local_scrape_loop()
@@ -388,7 +389,7 @@ if __name__ == "__main__":
             raise e
     
     # -----------
-    def test_with_prometheus(): 
+    def test_with_prometheus(args): 
         # Create the MicroView collector instance
         uview = MicroView(args.control_plane)
         
@@ -417,4 +418,4 @@ if __name__ == "__main__":
                 uview.rdma.cleanup()
 
     test_function_name = "test_" + args.test.lower()
-    run_test(test_function_name)
+    run_test(test_function_name, args)
