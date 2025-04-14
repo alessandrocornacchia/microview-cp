@@ -49,6 +49,5 @@ dependencies:
       - charset-normalizer==3.4.1
       - idna==3.10
       - prometheus-client==0.21.1
-      - pyverbs==56.0rc5
       - requests==2.32.3
       - urllib3==2.3.0

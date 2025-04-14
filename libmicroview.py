@@ -2,7 +2,6 @@ import numpy as np
 import requests
 from multiprocessing import shared_memory
 from typing import Dict, Optional, Union, Any
-from metrics import metric_dtype
 import ctypes 
 import logging
 from utils import open_untracked_shared_memory, peek_shared_memory
@@ -36,6 +35,10 @@ class MicroViewMetric:
     A class representing a single metric in the MicroView system.
     Abstracts away the details of shared memory access.
     """
+
+    METRIC_TYPE_COUNTER = 0
+    METRIC_TYPE_GAUGE = 1
+
     def __init__(self, value_ptr: int, metric_name: str, metric_type: bool):
         """
         Initialize a MicroViewMetric.
@@ -172,6 +175,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="MicroView Client Example")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--num-metrics", "-m", type=int, default=2, help="Number of metrics to create")
+    parser.add_argument("--update-metrics", action="store_true", help="Update metrics every 10 seconds")
+
 
     args = parser.parse_args()
 
@@ -183,20 +189,26 @@ if __name__ == "__main__":
     client = MicroViewClient("example-service")
     
     try:
-        # Create a counter metric
-        requests_metric = client.create_metric("http_requests_total", False, 0)
         
-        # Create a gauge metric
-        latency_metric = client.create_metric("http_request_latency", True, 0.0)
+        # create num_metrics metrics
+        for i in range(int(args.num_metrics/2)):
+            
+            # Create a counter metric
+            requests_metric = client.create_metric(f"http_requests_total_{i}", MicroViewMetric.METRIC_TYPE_COUNTER, 0)
+            
+            # Create a gauge metric
+            latency_metric = client.create_metric(f"http_request_latency_{i}", MicroViewMetric.METRIC_TYPE_GAUGE, 0.0)
         
         # Update the metrics 10 times
         i = 0
         while True:
-            requests_metric.update_value(i)
-            latency_metric.update_value(i * 0.1)
-            i += 1
+            
+            if args.update_metrics:
+                requests_metric.update_value(i)
+                latency_metric.update_value(i * 0.1)
+                i += 1
 
-            logger.info(f"Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
+                logger.info(f"Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
             
             import time
             time.sleep(10)

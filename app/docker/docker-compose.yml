@@ -1,0 +1,23 @@
+version: '3'
+
+services:
+  microview-client:
+    build:
+      context: ../..  # Points to the root directory
+      dockerfile: app/docker/Dockerfile
+    container_name: microview-client
+    ipc: host  # Critical for shared memory access
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - NUM_METRICS=2
+      - DEBUG_MODE=true  # Set to empty to disable
+      # Specify to connect to MicroViewHostAgent running on node
+      - MICROVIEW_HOST=host.docker.internal
+      - MICROVIEW_PORT=5000
+    volumes:
+      # - ./:/app  # Mount code for development
+      - /dev/shm:/dev/shm  # Explicitly mount shared memory
+    restart: unless-stopped
+    # Set network mode if needed
+    # network_mode: "host"
