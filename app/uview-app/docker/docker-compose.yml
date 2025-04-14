@@ -2,9 +2,7 @@ version: '3'
 
 services:
   microview-client:
-    build:
-      context: ../..  # Points to the root directory
-      dockerfile: app/docker/Dockerfile
+    build: .
     container_name: microview-client
     ipc: host  # Critical for shared memory access
     extra_hosts:

@@ -8,3 +8,7 @@ bin/**
 __pycache__/**
 *.pyc
 *.log
+
+# ignore here as they are linux links
+**/docker/utils.py
+**/docker/libmicroview.py
