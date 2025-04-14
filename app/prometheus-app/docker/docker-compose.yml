@@ -21,22 +21,12 @@ services:
     - 9090:9090
     volumes:
     - ./prometheus.yml:/etc/prometheus/prometheus.yml
-  uview-app:
+  prometheus-app:
     build: .
-    container_name: microview-app
-    ipc: host  # Critical for shared memory access
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    container_name: prometheus-app
+    ports:
+      - "8000:8000"
     environment:
-      - NUM_METRICS=2
-      - DEBUG_MODE=true  # Set to empty to disable
-      # Specify to connect to MicroViewHostAgent running on node
-      - MICROVIEW_HOST=host.docker.internal
-      - MICROVIEW_PORT=5000
-    volumes:
-      # - ./:/app  # Mount code for development
-      - /dev/shm:/dev/shm  # Explicitly mount shared memory
+      - NUM_METRICS=${NUM_METRICS:-10}
+      - UPDATE_METRICS=${UPDATE_METRICS:-0}
     restart: unless-stopped
-    
-    # Set network mode if needed
-    # network_mode: "host"

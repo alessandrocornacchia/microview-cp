@@ -115,13 +115,14 @@ Enter MR filename or Press Enter to start RDMA reads...
 
 
 ## TODO list
-- Shared memory should be one large block, where RDMA memory regions are 4KB size and contiguous (done)
-- How to handle close(). MicroView client should probably close nothing: shared memmory is managed by the uView agent
-and deleting metrics make little sense (when pod disappear, it's page will just be released entirely)
 - Metrics have now fixed structure (only floating point support), this can be changed with a more flexible memory layout
-- log management 
 - now you have some high level description of the code in the `.md` file, use that for next iterations (either here or in perplexity)
-- Is it normal I can go in RTS with a queue pair that is not associated to any user space code ?
+- how to manage threads in uView NIC
+- try deploy on smart NIC
+- saturation experiments:
+  * uView max number of prometheus connections
+  * RPC latency vs RPS when uview runs on host
+
 
 ## RDMA in Linux: primer
 
