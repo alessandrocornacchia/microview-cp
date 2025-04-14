@@ -11,6 +11,8 @@ metric_dtype = np.dtype([
     ('value', np.float64),  # metric value, 8B
 ], align=True)
 
+METRIC_TYPE_COUNTER = 0
+METRIC_TYPE_GAUGE = 1
 
 def update_metric_value_from_ptr(ptr_address, new_value):
     """Update a float64 value at the given address"""
@@ -82,7 +84,7 @@ class MetricsPage:
         metrics = []
         for i in range(self.num_entries):
             name, metric_type, value = self.metrics[i]
-            metrics.append((name, metric_type, value))
+            metrics.append((name.decode(), metric_type, value))
         return metrics
     
     

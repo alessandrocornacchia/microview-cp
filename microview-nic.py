@@ -4,8 +4,9 @@ import time
 import logging
 import requests
 import numpy as np
-from metrics import MetricsPage
-from prometheus_client import start_http_server, REGISTRY, Metric
+from metrics import METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, MetricsPage, metric_dtype
+from prometheus_client import start_http_server
+from prometheus_client.core import REGISTRY, CounterMetricFamily, GaugeMetricFamily
 from defaults import *
 #from rdma.cm_collector import RDMACollectorCm
 from rdma.helpers import MRMetadata, OneSidedReader, QueuePairPool
@@ -76,39 +77,8 @@ class MicroViewBase(abc.ABC):
         Returns:
             List of Prometheus metrics
         """
-        prom_metrics = []
-        
-        try:
-            # Read all metrics using RDMA
-            raw_metrics = self.rdma.read_all_metrics()
-            
-            # Process raw metrics into Prometheus format
-            # This is a simplified implementation - in reality you would need to parse
-            # the raw memory according to the metric_dtype structure
-            for microservice_id, raw_data in raw_metrics.items():
-                try:
-                    # In a real implementation, you would parse the memory page to extract
-                    # each metric by using the metric_dtype structure. This is just a placeholder.
-                    metric = Metric(f"microview_{microservice_id}", 
-                                  f"MicroView metric for {microservice_id}", 
-                                  'gauge')
-                    
-                    metric.add_sample(
-                        f"microview_{microservice_id}_collected",
-                        value=1.0,  # Placeholder - you would extract real values
-                        labels={"service": microservice_id}
-                    )
-                    
-                    prom_metrics.append(metric)
-                    
-                except Exception as e:
-                    logger.error(f"Failed to process metrics for {microservice_id}: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error collecting metrics: {e}")
-        
-        return prom_metrics
-    
+        pass
+
     def cleanup(self):
         """Clean up resources"""
         if self.rdma:
@@ -221,6 +191,7 @@ class MicroView(MicroViewBase):
             active_mrs)
         logger.info("💾 RDMA active reader initialized")
 
+
     def setup(self):
         """
         Initialize the collector by fetching metrics layout and setting up RDMA.
@@ -232,53 +203,122 @@ class MicroView(MicroViewBase):
             
             # setup data plane connection
             self.connect_with_microview_host()
-            
+
             logger.info("✅ MicroView collector initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize MicroView collector: {e}")
             raise
 
-    
+            
+    def _local_metrics_reading(self):
+        """
+        Local metrics reading
+        """
+        # execute one RDMA read operation from all active memory regions
+        results = self.rdma.execute(poll_interval=DEFAULT_POLL_INTERVAL)
+        metrics : Dict[str, List[Any]] = {}
+
+        # Loop over memory regions
+        for i in range(len(results)):
+            # this is now one MR
+            data_region = results[i]
+            # this is the corresponding control information
+            control_region = self.control_info[i]
+            
+            # Loop over pages in the memory region
+            for j in range(len(control_region)):
+                pod_id = control_region[j]["pod_id"]
+                page_occupancy = control_region[j]["pages"]
+                
+                # TODO this assumes fixed page size
+                page_bytes = data_region[j*DEFAULT_PAGE_SIZE:(j+1)*DEFAULT_PAGE_SIZE]   
+                
+                logger.debug(f"📊 Reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
+                logger.debug(f"📊 Page bytes: {len(page_bytes)}")
+                            
+                mp = MetricsPage.from_bytes(page_bytes, page_occupancy)
+                # returns list of tuples (name, type, value)
+                m = mp.get_metrics()
+                
+                metrics.setdefault(pod_id, []).extend(m)
+
+                logger.debug(f"📈 Metrics for {pod_id}: {m}")
+
+        return metrics
+
+
     def start_local_scrape_loop(self):
         """ 
         Local metrics reading loop, should be pin to a dedicated thread ideally 
         """
         logger.info(f"Entering local scrape loop with scrape_interval={self.scrape_interval}, press Ctrl+C to exit")
         try:
-            while True:
-                # execute one RDMA read operation from all active memory regions
-                results = self.rdma.execute(poll_interval=DEFAULT_POLL_INTERVAL)
-
-                # Loop over memory regions
-                for i in range(len(results)):
-                    # this is now one MR
-                    data_region = results[i]
-                    # this is the corresponding control information
-                    control_region = self.control_info[i]
-                    
-                    # Loop over pages in the memory region
-                    for j in range(len(control_region)):
-                        pod_id = control_region[j]["pod_id"]
-                        page_occupancy = control_region[j]["pages"]
-                        
-                        # NOTE assumes fixed page size
-                        page_bytes = data_region[j*DEFAULT_PAGE_SIZE:(j+1)*DEFAULT_PAGE_SIZE]   
-                        
-                        logger.debug(f"📊 Reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
-                        logger.debug(f"📊 Page bytes: {len(page_bytes)}")
-                        # logger.debug(f"📊 Page bytes decoded: {page_bytes.decode('utf-8')[:100]}")
-                                    
-                        mp = MetricsPage.from_bytes(page_bytes, page_occupancy)
-                        metrics = mp.get_metrics()
-
-                        logger.debug(f"📈 Metrics for {pod_id}: {metrics}")
-
+            while True:        
+                
+                metrics = self._local_metrics_reading()
+                
                 # wait until next local read 
                 time.sleep(self.scrape_interval)
+        
         except KeyboardInterrupt:
             logger.info("Gracefully terminating RDMA operations")
             self.cleanup()
+
+
+    def collect(self):
+        """
+        Collect metrics for Prometheus
+        
+        Returns:
+            List of Prometheus metrics
+        """
+        prom_metrics = []
+        
+        try:
+            # Read all metrics using RDMA
+            logger.debug(f"🔭 Received scrape request, starting local metrics reading")
+            raw_metrics = self._local_metrics_reading()
+            
+            # loop over pods
+            for pod_id, raw in raw_metrics.items():
+                
+                try:
+                    # loop over metrics of type metric_dtype
+                    for metric_tuple in raw:
+                        
+                        # Extract metric name, type, and value
+                        metric_name, metric_type, value = metric_tuple
+                        logger.debug(f"📊 Processing metric {metric_name} of type {metric_type} with value {value}")
+                        
+                        # Process raw metrics into Prometheus format
+                        # Process raw metrics into Prometheus format
+                        if metric_type == METRIC_TYPE_COUNTER:
+                            metric = CounterMetricFamily(
+                                name=metric_name,
+                                documentation=f"Counter metric {metric_name}",
+                                labels=['pod_id']
+                            )
+                        elif metric_type == METRIC_TYPE_GAUGE:
+                            metric = GaugeMetricFamily(
+                                name=metric_name,
+                                documentation=f"Gauge metric {metric_name}",
+                                labels=['pod_id']
+                            )
+                        
+                        metric.add_metric([pod_id], value)
+                        # Add the metric to the list
+                        prom_metrics.append(metric)
+                        
+                except Exception as e:
+                    logger.error(f"Failed to process metrics for {pod_id}: {e}")
+                    raise e
+            
+        except Exception as e:
+            logger.error(f"Error collecting metrics: {e}")
+            raise e
+        
+        return prom_metrics
 
 
     def cleanup(self):
@@ -391,12 +431,10 @@ if __name__ == "__main__":
     # -----------
     def test_with_prometheus(args): 
         # Create the MicroView collector instance
-        uview = MicroView(args.control_plane)
+        uview = test_microview_setup(args)
         
         try:
-            # Initialize collector with specified number of connections
-            uview.setup(args.connections)
-            
+
             # Register with Prometheus
             REGISTRY.register(uview)
             
@@ -406,16 +444,14 @@ if __name__ == "__main__":
             
             # Keep the main thread alive
             while True:
-                time.sleep(1)
+                time.sleep(10)
                 
         except KeyboardInterrupt:
             logger.info("Shutting down...")
         except Exception as e:
             logger.error(f"Error: {e}")
         finally:
-            # Cleanup
-            if hasattr(uview, 'rdma_manager') and uview.rdma:
-                uview.rdma.cleanup()
+            uview.cleanup()
 
     test_function_name = "test_" + args.test.lower()
     run_test(test_function_name, args)
