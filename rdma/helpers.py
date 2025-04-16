@@ -49,7 +49,7 @@ class MemoryRegionPool:
     """
     Manages memory regions that can be accessed via RDMA
     """
-    def __init__(self, pd, default_buffer_size=DEFAULT_BUFFER_SIZE):
+    def __init__(self, pd, default_buffer_size=DEFAULT_PAGE_SIZE):
         """
         Initialize the memory region manager
         
@@ -513,15 +513,13 @@ class OneSidedReader:
         for i in range(self.n_mr):
             self.mrm.create_memory_region(f"local_mr_{i}", self.remote_mrs[i].length)
 
-    def execute(self, poll_interval):
+    def execute(self):
         """
         One-off execution
         """
         # issue RDMA reads
         for i in range(self.n_mr):
             self.rdma_read(i)
-
-        time.sleep(poll_interval)  # Sleep to avoid busy waiting
 
         # wait for completions
         ncomp = 0
@@ -547,9 +545,7 @@ class OneSidedReader:
         Perform an RDMA READ operation
         
         Args:
-            remote_addr: Remote memory address to read from
-            rkey: Remote key for the memory region
-            length: Length of data to read (defaults to buffer_size)
+            index: Index of the remote memory region to read from
             
         Returns:
             The data read from remote memory
@@ -810,8 +806,8 @@ if __name__ == "__main__":
     parser.add_argument("-c", "--client", action="store_true", help="Run as RDMA client")
     parser.add_argument("--qp", type=int, default=DEFAULT_QP_POOL_SIZE,
                       help=f"Size of Queue Pair pool (default: {DEFAULT_QP_POOL_SIZE})")
-    parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE,
-                      help=f"Default size of memory buffers (default: {DEFAULT_BUFFER_SIZE})")
+    parser.add_argument("--buffer-size", type=int, default=DEFAULT_PAGE_SIZE,
+                      help=f"Default size of memory buffers (default: {DEFAULT_PAGE_SIZE})")
     parser.add_argument("--rdma-device", type=str, default=DEFAULT_RDMA_DEVICE,
                         help=f"RDMA device to use (default: {DEFAULT_RDMA_DEVICE})")
     parser.add_argument("--local-to", type=str, default="rdma_passive_info",

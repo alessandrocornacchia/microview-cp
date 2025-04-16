@@ -29,14 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('MicroviewHostAgent')
 
-# TODO merge with defaults
-# This is configurable, but 800KB shared memory assumes applications with:
-#   100 pods x 100 metrics x 80 bytes
-SHM_POOL_SIZE = 800 * 1024
-SHM_POOL_NAME = "microview"
-DEFAULT_RDMA_MR_SIZE = 64 * 1024  # 64KB maximum size for RDMA read groups
-DEFAULT_QP_POOL_SIZE = 1
-
 class AllocationStrategy(ABC):
     @abstractmethod
     def allocate_metric(self, microservice_id: str, metric_name: str, metric_type: bool, initial_value: float) -> Tuple[str, int]:
@@ -53,15 +45,18 @@ class MetricsMemoryManager(AllocationStrategy):
         All metrics are registered there
     """
         
-    def __init__(self):
+    def __init__(self, page_size: int = DEFAULT_PAGE_SIZE, mr_size: int = DEFAULT_RDMA_MR_SIZE):
+        
+        self.page_size = page_size
+        self.mr_size = mr_size
         
         # Calculate how many metrics fit in a page
         item_size = np.dtype(metric_dtype).itemsize
-        self.metrics_per_page = DEFAULT_PAGE_SIZE // item_size
+        self.metrics_per_page = page_size // item_size
         logger.info(f"Each page can hold {self.metrics_per_page} metrics of size {item_size} bytes")
         
         # Calculate how many pages we can fit
-        self.max_pages = SHM_POOL_SIZE // DEFAULT_PAGE_SIZE
+        self.max_pages = SHM_POOL_SIZE // page_size
         logger.info(f"Shared memory pool can hold {self.max_pages} pages")
         
         # Allocate shared memory for the entire application
@@ -76,7 +71,7 @@ class MetricsMemoryManager(AllocationStrategy):
         self.allocated_pages = 0
         
         #TODO all this must be parameteric
-        self.num_mr = SHM_POOL_SIZE // DEFAULT_RDMA_MR_SIZE
+        self.num_mr = SHM_POOL_SIZE // mr_size
         
         # Memory region pool
         self.mr_pool = None  
@@ -98,16 +93,16 @@ class MetricsMemoryManager(AllocationStrategy):
         self.mr_pool = MemoryRegionPool(pd)
         
         # TODO these parameters should be configurable with fallback to default value
-        if DEFAULT_RDMA_MR_SIZE % DEFAULT_PAGE_SIZE != 0:
-            raise ValueError(f"RDMA MR size {DEFAULT_RDMA_MR_SIZE} must be a multiple of page size {DEFAULT_PAGE_SIZE}")
+        if self.mr_size % self.page_size != 0:
+            raise ValueError(f"RDMA MR size {self.mr_size} must be a multiple of page size {self.page_size}")
         
         base_addr = self.get_shm_base_addr()
 
         for i in range(self.num_mr):
             mr_info = self.mr_pool.register_memory_region(
                 name=f"RDMA-MR-{i}",
-                addr=base_addr + (i * DEFAULT_RDMA_MR_SIZE),
-                size=DEFAULT_RDMA_MR_SIZE)
+                addr=base_addr + (i * self.mr_size),
+                size=self.mr_size)
     
 
     def _create_new_page(self, pod_id: str) -> MetricsPage:
@@ -117,7 +112,7 @@ class MetricsMemoryManager(AllocationStrategy):
             raise ValueError("No more shared memory pages available")
         
         # Calculate page offset in the shared memory
-        page_offset = self.allocated_pages * DEFAULT_PAGE_SIZE
+        page_offset = self.allocated_pages * self.page_size
 
         # Create metrics page object
         metrics_page = MetricsPage(buffer = self.shm.buf, 
@@ -131,7 +126,7 @@ class MetricsMemoryManager(AllocationStrategy):
         # NOTE this assumes that the page is aligned with the RDMA MR size,
         # all pages are the same size and the allocation strategy is sequential
         # i.e., fill the first MR, then the second, etc.
-        mr_idx = page_offset // DEFAULT_RDMA_MR_SIZE
+        mr_idx = page_offset // self.mr_size
         logger.debug(f"Adding page to memory region {mr_idx} at offset {page_offset}")
         self.mr_pages[mr_idx].append(metrics_page)
 
@@ -174,7 +169,7 @@ class MetricsMemoryManager(AllocationStrategy):
                 metrics_page = self._create_new_page(pod_id)
             
             value_address_offset = metrics_page.add_metric(metric_name, metric_type, initial_value)    
-            logger.debug(f"Allocated metric, value offset {value_address_offset} in shared memory")
+            logger.debug(f"Added metrics to page with address {metrics_page.addr}, @ offset {value_address_offset}")
 
         except:
             logger.error(f"Error registering metric {metric_name} for microservice {pod_id}")
@@ -243,7 +238,7 @@ class MicroviewHostAgent:
             try:
             
                 metric_type = bool(data['type'])
-                microservice_name = data['microservice_id'] + f"-{int(time.time())}"
+                microservice_name = data['microservice_id']
                 addr_offset = self.mem_mgmt.allocate_metric(
                     microservice_name,
                     data['name'],
@@ -279,6 +274,7 @@ class MicroviewHostAgent:
                     control_region.append({
                         "pod_id": pod_id,
                         "pages": page_occupancy,
+                        "page_size_bytes": self.mem_mgmt.page_size,
                     })
                 res.append(control_region)
 
@@ -423,7 +419,7 @@ class MicroviewHostAgent:
     #     logger.info("RDMA server started")
 
     
-    def _init_rdma(self, qp_pool_size=DEFAULT_QP_POOL_SIZE):
+    def _init_rdma(self, qp_pool_size : int, rdma_device : str):
         
         if not self.start_rdma:
             logger.info("RDMA server not started. Set start_rdma flag to True")
@@ -435,7 +431,7 @@ class MicroviewHostAgent:
         try:
             
             # Initialize QP pool
-            self.qp_pool = QueuePairPool(DEFAULT_RDMA_DEVICE, pool_size=qp_pool_size)
+            self.qp_pool = QueuePairPool(rdma_device, pool_size=qp_pool_size)
             logger.info(f"Created QP pool with size {qp_pool_size}")
 
             # Tell memory manager now can create memory regions
@@ -452,9 +448,10 @@ class MicroviewHostAgent:
             
 
     
-    def start(self):
+    def start(self, num_qps: int = DEFAULT_QP_POOL_SIZE, rdma_device: str = DEFAULT_RDMA_DEVICE):
+        """Start the Microview Host Agent"""
         try:
-            self._init_rdma()
+            self._init_rdma(num_qps, rdma_device)
             logger.info(f"Starting REST API on {self.host}:{self.api_port}")
             self.app.run(host=self.host, port=self.api_port)
         except KeyboardInterrupt:

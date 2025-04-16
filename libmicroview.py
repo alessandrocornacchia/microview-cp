@@ -6,6 +6,7 @@ import ctypes
 import logging
 from utils import open_untracked_shared_memory, peek_shared_memory
 
+
 # >>>>>> PATCH not to let multiprocessing clean up shared memory
 # This is a workaround to prevent the multiprocessing library from cleaning up shared memory
 import multiprocessing.resource_tracker
@@ -172,6 +173,7 @@ class MicroViewClient:
 if __name__ == "__main__":
     
     import argparse
+    import time
 
     parser = argparse.ArgumentParser(description="MicroView Client Example")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -185,8 +187,8 @@ if __name__ == "__main__":
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug logging enabled")
 
-    # Create a MicroView client
-    client = MicroViewClient("example-service")
+    # Create a MicroView client, with unique name hasing the current nanosecond timestamp 
+    client = MicroViewClient("example-service-" + str(hash(time.time_ns())))
     
     try:
         
@@ -210,7 +212,6 @@ if __name__ == "__main__":
 
                 logger.info(f"Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
             
-            import time
             time.sleep(10)
     except KeyboardInterrupt:            
         pass

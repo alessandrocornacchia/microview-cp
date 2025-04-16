@@ -3,14 +3,11 @@ from typing import Dict, List, Tuple, Any, Optional, Callable
 import time
 import logging
 import requests
-import numpy as np
-from metrics import METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, MetricsPage, metric_dtype
+from LMAP import LMAP
 from prometheus_client import start_http_server
-from prometheus_client.core import REGISTRY, CounterMetricFamily, GaugeMetricFamily
+from prometheus_client.core import REGISTRY
 from defaults import *
-#from rdma.cm_collector import RDMACollectorCm
 from rdma.helpers import MRMetadata, OneSidedReader, QueuePairPool
-#from readers.rdma_connections import group_memory_pages_contiguous
 
 # Configure logging
 logging.basicConfig(
@@ -37,7 +34,6 @@ class MicroViewBase(abc.ABC):
         self.control_plane_url = control_plane_url
         self.metrics_layout = {}  # Memory layout of metrics from control plane
         self.metrics_config = {}  # Configuration of metrics (types, etc.)
-        self.rdma = None
         
         self.scrape_interval = scrape_interval
 
@@ -56,33 +52,18 @@ class MicroViewBase(abc.ABC):
         """
         pass
     
-    
     def configure_collector(self, service_id: str, *args, **kwargs):
         """Configure collector for a specific service (placeholder for future functionality)"""
         logger.info(f"Configuring collector for service {service_id}")
         # Implementation will depend on specific requirements
     
-    def configure_lmap(self, service_id: str, metrics_config: Dict, sketch_params: Dict):
+    def configure_lmaps(self):
         """Configure local mapping for metrics (placeholder for future functionality)"""
-        logger.info(f"Configuring local mapping for service {service_id}")
-        self.metrics_config[service_id] = {
-            "metrics": metrics_config,
-            "sketch_params": sketch_params
-        }
-    
-    def collect(self):
-        """
-        Collect metrics for Prometheus
-        
-        Returns:
-            List of Prometheus metrics
-        """
         pass
-
+    
     def cleanup(self):
         """Clean up resources"""
-        if self.rdma:
-            self.rdma.cleanup()
+        pass    
     
     def __del__(self):
         """Clean up resources"""
@@ -92,12 +73,18 @@ class MicroViewBase(abc.ABC):
 class MicroView(MicroViewBase):
     """Standard implementation of MicroView collector"""
     
-    def __init__(self, control_plane_url: str, scrape_interval: int = 1):
+    def __init__(self, control_plane_url: str, 
+                 scrape_interval: int = DEFAULT_POLL_INTERVAL, 
+                 num_collectors: int = DEFAULT_LMAP,
+                 rdma_device: str = DEFAULT_RDMA_DEVICE):
+        
         super().__init__(control_plane_url, scrape_interval)
         self.qp_pool = None     # Queue Pair pool, each RDMA reader will have its own QP
         self.remote_memory_regions = None   # List of remote memory regions
         self.control_info : List[List[Dict]] = None  # Control info from the control plane
-
+        self.num_collectors = num_collectors
+        self.lmaps = []
+        self.rdma_device = rdma_device
 
     def connect_with_microview_host(self):
         """
@@ -106,7 +93,7 @@ class MicroView(MicroViewBase):
         logger.info("Connecting with host")
         try:
             # 1. Initialize QP pool
-            self.qp_pool = QueuePairPool(DEFAULT_RDMA_DEVICE, pool_size=DEFAULT_QP_POOL_SIZE)
+            self.qp_pool = QueuePairPool(self.rdma_device, pool_size=DEFAULT_QP_POOL_SIZE)
 
             # 2. Obtain local QP info
             local_qp_info = self.qp_pool.list_queue_pairs()
@@ -156,13 +143,10 @@ class MicroView(MicroViewBase):
             self.cleanup()
             raise e
             
-    def configure_metric_collection(self):
+    def configure_lmaps(self):
         """
         Fetch configuration from remote side for existing metrics, then assigns to 
         RDMA one-sided readers. 
-        
-        Returns:
-            Dictionary mapping microservice IDs to their metrics info
         """
         
         try:
@@ -173,23 +157,63 @@ class MicroView(MicroViewBase):
         except Exception as e:
             logger.error(f"Failed to fetch memory layout: {e}")
         
-        # TODO here is where we would need to decide how many readers to create
-        # and how to group memory pages. Now we just create one reader for all. 
-
         if len(self.control_info) != len(self.remote_memory_regions):
             raise RuntimeError("Mismatch between control info and remote memory regions")
         
         # filter out empty memory regions
-        active_mrs = []
+        active_mrs_idx = []
         for i,mr in enumerate(self.control_info):
             if len(mr) != 0:
-                active_mrs.append(self.remote_memory_regions[i])
+                active_mrs_idx.append(i)
+
+        # TODO here is where we would need to decide how many readers to create
+        # and how to group memory pages. Now we just evenly distribute Memory Regions
+        # among the LMAPs. If the MR contains few memory pages, it will be assigned to
+        # one LMAP with a dedicated RDMA reader, which might be inefficient in terms of
+        # RDMA goodput
         
-        self.rdma = OneSidedReader(
-            self.qp_pool.pd, 
-            self.qp_pool.get_qp_object(0), 
-            active_mrs)
-        logger.info("💾 RDMA active reader initialized")
+        if not active_mrs_idx:
+            logger.warning("⚠️ No active memory regions found")
+            return
+        
+        # Distribute memory regions among collectors
+        nlmap = min(self.num_collectors, len(active_mrs_idx))
+
+        for i in range(nlmap):
+            # Calculate which memory regions this collector should handle
+            start_idx = i * len(active_mrs_idx) // nlmap
+            if i == nlmap - 1:
+                end_idx = len(active_mrs_idx)
+            else:
+                end_idx = (i + 1) * len(active_mrs_idx) // nlmap
+            mr_indices = active_mrs_idx[start_idx:end_idx]
+            
+            # Get the specific memory regions and control info for this collector
+            MRs = [self.remote_memory_regions[j] for j in mr_indices]
+            CRs = [self.control_info[j] for j in mr_indices]
+
+            # Create a dedicated RDMA reader for this collector targeting selected MRs
+            rdma = OneSidedReader(
+                self.qp_pool.pd,
+                self.qp_pool.get_qp_object(i % DEFAULT_QP_POOL_SIZE),
+                MRs
+            )
+            
+            # Create LMAP collector with this RDMA reader
+            lmap = LMAP(
+                collector_id=f"LMAP_{i}",
+                control_info=CRs,
+                rdma=rdma,
+            )
+            
+            # Add to list of collectors
+            self.lmaps.append(lmap)
+            
+            # Register with Prometheus
+            REGISTRY.register(lmap)
+            
+            logger.info(f"🔗 LMAP collector {i} registered with {len(mr_indices)} memory regions")
+        
 
 
     def setup(self):
@@ -204,126 +228,19 @@ class MicroView(MicroViewBase):
             # setup data plane connection
             self.connect_with_microview_host()
 
-            logger.info("✅ MicroView collector initialized successfully")
+            logger.info("✅ MicroView connected to host")
             
         except Exception as e:
             logger.error(f"Failed to initialize MicroView collector: {e}")
             raise
-
-            
-    def _local_metrics_reading(self):
-        """
-        Local metrics reading
-        """
-        # execute one RDMA read operation from all active memory regions
-        results = self.rdma.execute(poll_interval=DEFAULT_POLL_INTERVAL)
-        metrics : Dict[str, List[Any]] = {}
-
-        # Loop over memory regions
-        for i in range(len(results)):
-            # this is now one MR
-            data_region = results[i]
-            # this is the corresponding control information
-            control_region = self.control_info[i]
-            
-            # Loop over pages in the memory region
-            for j in range(len(control_region)):
-                pod_id = control_region[j]["pod_id"]
-                page_occupancy = control_region[j]["pages"]
-                
-                # TODO this assumes fixed page size
-                page_bytes = data_region[j*DEFAULT_PAGE_SIZE:(j+1)*DEFAULT_PAGE_SIZE]   
-                
-                logger.debug(f"📊 Reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
-                logger.debug(f"📊 Page bytes: {len(page_bytes)}")
-                            
-                mp = MetricsPage.from_bytes(page_bytes, page_occupancy)
-                # returns list of tuples (name, type, value)
-                m = mp.get_metrics()
-                
-                metrics.setdefault(pod_id, []).extend(m)
-
-                logger.debug(f"📈 Metrics for {pod_id}: {m}")
-
-        return metrics
-
-
-    def start_local_scrape_loop(self):
-        """ 
-        Local metrics reading loop, should be pin to a dedicated thread ideally 
-        """
-        logger.info(f"Entering local scrape loop with scrape_interval={self.scrape_interval}, press Ctrl+C to exit")
-        try:
-            while True:        
-                
-                metrics = self._local_metrics_reading()
-                
-                # wait until next local read 
-                time.sleep(self.scrape_interval)
         
-        except KeyboardInterrupt:
-            logger.info("Gracefully terminating RDMA operations")
-            self.cleanup()
-
-
-    def collect(self):
-        """
-        Collect metrics for Prometheus
-        
-        Returns:
-            List of Prometheus metrics
-        """
-        prom_metrics = []
-        
-        try:
-            # Read all metrics using RDMA
-            logger.debug(f"🔭 Received scrape request, starting local metrics reading")
-            raw_metrics = self._local_metrics_reading()
-            
-            # loop over pods
-            for pod_id, raw in raw_metrics.items():
-                
-                try:
-                    # loop over metrics of type metric_dtype
-                    for metric_tuple in raw:
-                        
-                        # Extract metric name, type, and value
-                        metric_name, metric_type, value = metric_tuple
-                        logger.debug(f"📊 Processing metric {metric_name} of type {metric_type} with value {value}")
-                        
-                        # Process raw metrics into Prometheus format
-                        # Process raw metrics into Prometheus format
-                        if metric_type == METRIC_TYPE_COUNTER:
-                            metric = CounterMetricFamily(
-                                name=metric_name,
-                                documentation=f"Counter metric {metric_name}",
-                                labels=['pod_id']
-                            )
-                        elif metric_type == METRIC_TYPE_GAUGE:
-                            metric = GaugeMetricFamily(
-                                name=metric_name,
-                                documentation=f"Gauge metric {metric_name}",
-                                labels=['pod_id']
-                            )
-                        
-                        metric.add_metric([pod_id], value)
-                        # Add the metric to the list
-                        prom_metrics.append(metric)
-                        
-                except Exception as e:
-                    logger.error(f"Failed to process metrics for {pod_id}: {e}")
-                    raise e
-            
-        except Exception as e:
-            logger.error(f"Error collecting metrics: {e}")
-            raise e
-        
-        return prom_metrics
-
+    
 
     def cleanup(self):
         """Clean up resources"""
         super().cleanup()
+        for lmap in self.lmaps:
+            lmap.cleanup()
         if self.qp_pool:
             self.qp_pool.cleanup()
         logger.info("MicroView collector cleaned up")
@@ -381,12 +298,14 @@ if __name__ == "__main__":
     parser.add_argument("--control-plane", required=True, help="Control plane URL")
     parser.add_argument("--port", type=int, default=8000, help="Prometheus HTTP server port")
     parser.add_argument("--scrape-interval", "-i", type=int, default=1, help="Local scrape interval in seconds")
+    parser.add_argument("--lmaps", "-l", type=int, default=1, help="Number of LMAP collectors")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--test", type=str, help="Run test function")
 
     
     args = parser.parse_args()
     
+    # Set up logging
     if args.debug:
         logger.setLevel(logging.DEBUG)
 
@@ -453,5 +372,48 @@ if __name__ == "__main__":
         finally:
             uview.cleanup()
 
+
+    # -----------
+    def test_with_prometheus_multithread(args):
+        """Test function to verify MicroView with Prometheus"""
+        try:
+            # Create a MicroView collector instance with multiple collectors
+            num_collectors = args.lmaps
+            uview = MicroView(
+                "localhost:5000", 
+                scrape_interval=args.scrape_interval,
+                num_collectors=num_collectors
+            )
+            
+            # Set up the collection process
+            uview.setup()
+
+            print("Waiting for metrics control region. Press Enter to continue...")
+            input()
+            
+            # Configure collectors (this call will also register the LMAPs with Prometheus)
+            uview.configure_lmaps()
+            
+            # Start the Prometheus HTTP server
+            start_http_server(args.port)
+            logger.info(f"Prometheus metrics server started on port {args.port}")
+            
+            # Keep the main thread alive
+            try:
+                print("Press Ctrl+C to exit")
+                while True:
+                    time.sleep(100)
+            except KeyboardInterrupt:
+                logger.info("Shutting down...")
+                
+        except Exception as e:
+            logger.error(f"Test failed: {e}")
+            raise
+        finally:
+            if 'uview' in locals():
+                uview.cleanup()
+
+    
+    # entry point for these tests
     test_function_name = "test_" + args.test.lower()
     run_test(test_function_name, args)
