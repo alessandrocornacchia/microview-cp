@@ -1,4 +1,4 @@
-MicroView Control Plane
+MicroView
 ======================
 
 An implementation SmartNIC-to-host communication via RDMA for microservices metrics.
@@ -13,29 +13,61 @@ The description of the project can be found in our published research paper:
 </div>
 <p></p>
 
-## Run instructions
-Start agent on localhost running:
+
+# Getting Started with MicroView
+
+## Quick Setup
+
+MicroView requires two components to run: a host agent and a SmartNIC collector. Follow these steps to get everything up and running.
+
+### 1. Set Up the SmartNIC
+
+First, configure the network interface on your SmartNIC:
+
+```bash
+# Configure network interface
+sudo ip a a 10.200.0.53/24 dev enp3s0f1s0
+
+# Verify connectivity to host
+ping 10.200.0.28
+
+# Find RDMA device info (note the device name, GID index and IB port)
+show_gids | grep enp3s0f1s0
 ```
-make
-./agent
+
+### 2. Start the Host Agent
+
+On your host machine, start the MicroView agent:
+
+```bash
+python microview-host.py --rdma-queues 2 --debug
 ```
 
-This will start microview agent at port 12345. Then run the following replacing `SERVER_ADDR` with the MicroView 
-agent address. If MicroView runs on node use `host.docker.internal`:
+### 3. Generate Test Metrics
+
+Create one or more metric generators to simulate application metrics:
+
+```bash
+python libmicroview.py --debug --num-metrics 64
 ```
-docker run --rm --name pod --ipc=host --add-host=host.docker.internal:host-gateway acornacchia/ipc "./pod" "SERVER_ADDR"
+
+### 4. Start the SmartNIC Collector
+
+Using the RDMA device information from step 1, start the collector on the SmartNIC:
+
+```bash
+python microview-nic.py -c 172.18.0.39:5000 -l 2 -d "mlx5_3" \
+                       --gid 1 --ib-port 1 \
+                       --test with_prometheus_multithread --debug
 ```
 
-The container should:
-1. Open a TCP connection to the agent and ask for a shared memory segment
-2. Start writing metrics to such a memory segment
+When prompted, press Enter to start scraping metrics.
 
-On the other hand, MicroView agent:
-1. allocates shared memory region and closes TCP connection
-2. sends RDMA `R_key` to the microview agent counter part which sits on the SmartNIC
+### 5. Access Prometheus Dashboard
 
+Open Prometheus in your browser to visualize the collected metrics:
+`http://192.168.100.2:8000`
 
-# Python prototype run instructions
 
 ### Test RDMA READ Pyverb
 First test a simple client/server Pyverbs example:
@@ -179,3 +211,26 @@ mlx5_4  1       1       fe80:0000:0000:0000:0ac0:ebff:fe15:3620                 
 mlx5_5  1       0       fe80:0000:0000:0000:0ac0:ebff:fe15:3621                 v1      enp65s0f1np1
 mlx5_5  1       1       fe80:0000:0000:0000:0ac0:ebff:fe15:3621                 v2      enp65s0f1np1
 ```
+
+
+## Run instructions (outdated for C example)
+Start agent on localhost running:
+```
+make
+./agent
+```
+
+This will start microview agent at port 12345. Then run the following replacing `SERVER_ADDR` with the MicroView 
+agent address. If MicroView runs on node use `host.docker.internal`:
+```
+docker run --rm --name pod --ipc=host --add-host=host.docker.internal:host-gateway acornacchia/ipc "./pod" "SERVER_ADDR"
+```
+
+The container should:
+1. Open a TCP connection to the agent and ask for a shared memory segment
+2. Start writing metrics to such a memory segment
+
+On the other hand, MicroView agent:
+1. allocates shared memory region and closes TCP connection
+2. sends RDMA `R_key` to the microview agent counter part which sits on the SmartNIC
+
