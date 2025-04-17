@@ -327,7 +327,7 @@ if __name__ == "__main__":
 
     
     ## --------- quick tests -----------
-    def test_microview_setup(args):
+    def test_setup(args):
         """Test function to verify MicroView setup"""
         try:
             # Create a MicroView collector instance
@@ -355,7 +355,7 @@ if __name__ == "__main__":
         """Test function to verify MicroView read operation"""
         try:
             
-            uview = test_microview_setup(args)
+            uview = test_setup(args)
             
             input("Waiting for metrics control region. Press Enter to continue...")
             
@@ -396,7 +396,7 @@ if __name__ == "__main__":
         """Test function to verify MicroView with Prometheus"""
         try:
             # Create a MicroView collector instance with multiple collectors
-            uview = test_microview_setup(args)
+            uview = test_setup(args)
             
             input("Waiting for metrics control region. Press Enter to continue...")
             

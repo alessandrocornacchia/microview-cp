@@ -449,7 +449,7 @@ class MicroviewHostAgent:
             
 
     
-    def start(self, num_qps: int, rdma_device: str = DEFAULT_RDMA_DEVICE):
+    def start(self, rdma_device: str = DEFAULT_RDMA_DEVICE):
         """Start the Microview Host Agent"""
         try:
             self._init_rdma(self.num_qps, rdma_device)
