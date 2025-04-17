@@ -211,9 +211,10 @@ class MetricsMemoryManager(AllocationStrategy):
 
 
 class MicroviewHostAgent:
-    def __init__(self, start_rdma: bool = False, host: str = "0.0.0.0", port: int = 5000):
+    def __init__(self, num_rdma_qps: int = 0, host: str = "0.0.0.0", port: int = 5000):
         
-        self.start_rdma = start_rdma    # useful for debug
+        self.start_rdma = num_rdma_qps > 0    # useful for debug
+        self.num_qps = num_rdma_qps
         self.host = host
         self.api_port = port
         self.qp_pool = None
@@ -448,10 +449,10 @@ class MicroviewHostAgent:
             
 
     
-    def start(self, num_qps: int = DEFAULT_QP_POOL_SIZE, rdma_device: str = DEFAULT_RDMA_DEVICE):
+    def start(self, num_qps: int, rdma_device: str = DEFAULT_RDMA_DEVICE):
         """Start the Microview Host Agent"""
         try:
-            self._init_rdma(num_qps, rdma_device)
+            self._init_rdma(self.num_qps, rdma_device)
             logger.info(f"Starting REST API on {self.host}:{self.api_port}")
             self.app.run(host=self.host, port=self.api_port)
         except KeyboardInterrupt:
@@ -474,7 +475,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Microview Host Agent")
-    parser.add_argument("--rdma", action="store_true", help="Enable RDMA server")
+    parser.add_argument("--rdma-queues", "-q", type=int, default=DEFAULT_QP_POOL_SIZE, 
+                        help="Number of RDMA queues to use. Set to 0 to disable RDMA server")
     parser.add_argument("--host", default="0.0.0.0", help="API host")
     parser.add_argument("--port", type=int, default=5000, help="API port")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -486,9 +488,9 @@ if __name__ == "__main__":
         logger.debug("Debug logging enabled")
 
     agent = MicroviewHostAgent(
-        start_rdma=args.rdma,
+        num_rdma_qps=args.rdma_queues,
         host=args.host,
-        port=args.port
+        port=args.port,
     )
 
     agent.start()
