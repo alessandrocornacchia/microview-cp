@@ -73,10 +73,13 @@ class MicroViewBase(abc.ABC):
 class MicroView(MicroViewBase):
     """Standard implementation of MicroView collector"""
     
-    def __init__(self, control_plane_url: str, 
+    def __init__(self, 
+                 control_plane_url: str, 
+                 rdma_device: str,
+                 ib_port: int,
+                 gid: int,
                  scrape_interval: int = DEFAULT_POLL_INTERVAL, 
-                 num_collectors: int = DEFAULT_LMAP,
-                 rdma_device: str = DEFAULT_RDMA_DEVICE):
+                 num_collectors: int = DEFAULT_LMAP):
         
         super().__init__(control_plane_url, scrape_interval)
         self.qp_pool = None     # Queue Pair pool, each RDMA reader will have its own QP
@@ -85,15 +88,21 @@ class MicroView(MicroViewBase):
         self.num_collectors = num_collectors
         self.lmaps = []
         self.rdma_device = rdma_device
+        self.ib_port = ib_port
+        self.gid = gid
 
     def connect_with_microview_host(self):
         """
         Creates Queue Pair pool, exchange queue pair information with the host and connects the queue pairs
         """
-        logger.info("Connecting with host")
+        logger.info(f"⏳ Connecting with MicroView host {self.control_plane_url}, RDMA={self.rdma_device}, port={self.ib_port}, gid={self.gid}")
         try:
             # 1. Initialize QP pool
-            self.qp_pool = QueuePairPool(self.rdma_device, pool_size=DEFAULT_QP_POOL_SIZE)
+            self.qp_pool = QueuePairPool(
+                self.rdma_device, 
+                pool_size=self.num_collectors,
+                ib_port=self.ib_port,
+                gid_index=self.gid)
 
             # 2. Obtain local QP info
             local_qp_info = self.qp_pool.list_queue_pairs()
@@ -129,7 +138,7 @@ class MicroView(MicroViewBase):
                 f"http://{self.control_plane_url}/rdma/mrs",
             )
             response.raise_for_status()
-            logger.info("🔗 Connected with MicroView host")
+            logger.info("🔗 Connected")
 
             # 8. Create local buffers, one for each remote MR
             self.remote_memory_regions = [MRMetadata(
@@ -143,7 +152,7 @@ class MicroView(MicroViewBase):
             self.cleanup()
             raise e
             
-    def configure_lmaps(self):
+    def configure_lmaps(self, start_local_scrape: bool = False):
         """
         Fetch configuration from remote side for existing metrics, then assigns to 
         RDMA one-sided readers. 
@@ -213,7 +222,11 @@ class MicroView(MicroViewBase):
             REGISTRY.register(lmap)
             
             logger.info(f"🔗 LMAP collector {i} registered with {len(mr_indices)} memory regions")
-        
+
+            # Start the collection process
+            if start_local_scrape:
+                lmap.start_local_scrape_loop()
+
 
 
     def setup(self):
@@ -295,10 +308,13 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="MicroView NIC Collector")
-    parser.add_argument("--control-plane", required=True, help="Control plane URL")
-    parser.add_argument("--port", type=int, default=8000, help="Prometheus HTTP server port")
+    parser.add_argument("--control-plane", "-c", required=True, help="Control plane URL")
+    parser.add_argument("--prometheus-port", type=int, default=8000, help="Prometheus HTTP server port")
     parser.add_argument("--scrape-interval", "-i", type=int, default=1, help="Local scrape interval in seconds")
     parser.add_argument("--lmaps", "-l", type=int, default=1, help="Number of LMAP collectors")
+    parser.add_argument("--dev", "-d", type=str, default=DEFAULT_RDMA_DEVICE, help="RDMA device name")
+    parser.add_argument("--ib-port", type=int, default=DEFAULT_IB_PORT, help="RDMA IB port")
+    parser.add_argument("--gid", type=int, default=DEFAULT_GID, help="RDMA GID index")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--test", type=str, help="Run test function")
 
@@ -315,17 +331,18 @@ if __name__ == "__main__":
         """Test function to verify MicroView setup"""
         try:
             # Create a MicroView collector instance
-            uview = MicroView("localhost:5000", scrape_interval=args.scrape_interval)
-            
+            uview = MicroView(
+                control_plane_url=args.control_plane,
+                rdma_device=args.dev,
+                ib_port=args.ib_port,
+                gid=args.gid,
+                num_collectors=args.lmaps,
+                scrape_interval=args.scrape_interval
+            )
             
             # Set up the collection process
             uview.setup()
 
-            input("Waiting for metrics control region. Press Enter to continue...")
-            
-            # Fetch metrics memory mapping from control plane and start readers.
-            uview.configure_metric_collection()
-            
             logger.info("MicroView setup test passed")
             
             return uview
@@ -340,26 +357,27 @@ if __name__ == "__main__":
             
             uview = test_microview_setup(args)
             
-            # Start local scrape loop
-            uview.start_local_scrape_loop()
+            input("Waiting for metrics control region. Press Enter to continue...")
             
+            # Configure collectors (this call will also register the LMAPs with Prometheus)
+            uview.configure_lmaps(start_local_scrape=True)
+
         except Exception as e:
             logger.error(f"MicroView read test failed: {e}")
             raise e
+        finally:
+            uview.cleanup()
     
     # -----------
     def test_with_prometheus(args): 
         # Create the MicroView collector instance
-        uview = test_microview_setup(args)
+        uview = test_microview_read(args)
         
         try:
 
-            # Register with Prometheus
-            REGISTRY.register(uview)
-            
             # Start the Prometheus HTTP server
-            start_http_server(args.port)
-            logger.info(f"Prometheus metrics server started on port {args.port}")
+            start_http_server(args.prometheus_port)
+            logger.info(f"Prometheus metrics server started on port {args.prometheus_port}")
             
             # Keep the main thread alive
             while True:
@@ -378,25 +396,16 @@ if __name__ == "__main__":
         """Test function to verify MicroView with Prometheus"""
         try:
             # Create a MicroView collector instance with multiple collectors
-            num_collectors = args.lmaps
-            uview = MicroView(
-                "localhost:5000", 
-                scrape_interval=args.scrape_interval,
-                num_collectors=num_collectors
-            )
+            uview = test_microview_setup(args)
             
-            # Set up the collection process
-            uview.setup()
-
-            print("Waiting for metrics control region. Press Enter to continue...")
-            input()
+            input("Waiting for metrics control region. Press Enter to continue...")
             
             # Configure collectors (this call will also register the LMAPs with Prometheus)
             uview.configure_lmaps()
             
             # Start the Prometheus HTTP server
-            start_http_server(args.port)
-            logger.info(f"Prometheus metrics server started on port {args.port}")
+            start_http_server(args.prometheus_port)
+            logger.info(f"Prometheus metrics server started on port {args.prometheus_port}")
             
             # Keep the main thread alive
             try:
