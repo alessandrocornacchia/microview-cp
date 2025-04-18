@@ -8,6 +8,7 @@ from prometheus_client import start_http_server
 from prometheus_client.core import REGISTRY
 from defaults import *
 from rdma.helpers import MRMetadata, OneSidedReader, QueuePairPool
+from classifiers.enums import Models
 
 # Configure logging
 logging.basicConfig(
@@ -189,7 +190,7 @@ class MicroView(MicroViewBase):
         nlmap = min(self.num_collectors, len(active_mrs_idx))
 
         for i in range(nlmap):
-            # Calculate which memory regions this collector should handle
+            # Calculate which memory regions this LMAP should handle
             start_idx = i * len(active_mrs_idx) // nlmap
             if i == nlmap - 1:
                 end_idx = len(active_mrs_idx)
@@ -208,12 +209,14 @@ class MicroView(MicroViewBase):
                 MRs
             )
             
-            # Create LMAP collector with this RDMA reader
+            # Create LMAP collector with this RDMA reader, and set the classifier
             lmap = LMAP(
                 collector_id=f"LMAP_{i}",
                 control_info=CRs,
                 rdma=rdma,
             )
+            
+            lmap.set_classifier(model=Models.FREQUENT_DIRECTION)
             
             # Add to list of collectors
             self.lmaps.append(lmap)

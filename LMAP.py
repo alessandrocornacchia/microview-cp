@@ -1,9 +1,14 @@
+import copy
 import logging
 import threading
 import time
 from typing import Dict, List, Tuple, Any, Optional, Callable
+
+import numpy as np
 from metrics import METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, MetricsPage
 from rdma.helpers import MRMetadata, OneSidedReader, QueuePairPool
+from classifiers.enums import Models
+from classifiers.classifiers import ModelBuilder, SubspaceAnomalyDetector
 from prometheus_client.core import REGISTRY, CounterMetricFamily, GaugeMetricFamily
 from defaults import DEFAULT_POLL_INTERVAL
 
@@ -14,6 +19,11 @@ class LMAP:
     Processing them with anomaly detector
     Ensuring compatibility with Prometheus format.
     """
+    
+    models = {
+        Models.FREQUENT_DIRECTION: SubspaceAnomalyDetector,
+        Models.VAE: None  # Placeholder for VAE model, will have its own builder
+    }
     
     def __init__(self, collector_id: str,
                  control_info: List[List[Dict]],
@@ -34,15 +44,38 @@ class LMAP:
         self.running = False
         self.thread = None
         self.logger = logging.getLogger(f'MicroviewNIC.LMAP.{collector_id}')
-    
 
-    def _local_metrics_reading(self):
+        self.classifiers: Dict[str, Any] = {}
+        
+        
+
+    def set_classifier(self, model: str, **kwargs: Any):
+        """
+        Set the classifier for all pods
+        """
+        
+        kwargs["model"] = model
+        for mr in self.control_info:
+            for ci in mr:
+                pod_id = ci["pod_id"]
+                kwargs["num_metrics"] = ci["num_metrics"]
+                try:
+                    c = LMAP.models[model].build(**kwargs)
+                    self.classifiers[pod_id] = c
+                except KeyError:
+                    raise ValueError(f"Unknown model type: {model}")
+                except Exception as e:
+                    self.logger.error(f"Error building classifier for pod {pod_id}: {e}")
+                    raise e
+        
+
+    def _read_metrics(self) -> Dict[str, List[MetricsPage]]:
         """
         Read metrics from assigned memory regions using RDMA
         """
         # Execute one RDMA read operation from all active memory regions
         results = self.rdma.execute()
-        metrics: Dict[str, List[Any]] = {}
+        metrics: Dict[str, List[MetricsPage]] = {}
 
         # Loop over memory regions
         for i in range(len(results)):
@@ -54,24 +87,65 @@ class LMAP:
             # Loop over pages in the memory region
             for j in range(len(control_region)):
                 pod_id = control_region[j]["pod_id"]
-                page_occupancy = control_region[j]["pages"]
+                page_occupancy = control_region[j]["num_metrics"]
                 page_size_bytes = control_region[j]["page_size_bytes"]
                 
                 # Read page data
-                page_bytes = data_region[j*page_size_bytes:(j+1)*page_size_bytes]   
+                raw_page = data_region[j*page_size_bytes:(j+1)*page_size_bytes]   
                 
                 self.logger.debug(f"📊 LMAP {self.collector_id} reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
                 
                 # Parse metrics from page
-                mp = MetricsPage.from_bytes(page_bytes, page_occupancy)
-                m = mp.get_metrics()
-                
-                self.logger.debug(f"Metrics for pod {pod_id}: {m}")
+                mp = MetricsPage.from_bytes(raw_page, page_occupancy)
                 
                 # Add metrics to collection
-                metrics.setdefault(pod_id, []).extend(m)
+                metrics.setdefault(pod_id, []).append(mp)
 
         return metrics
+    
+
+    def _read_metric_values(self) -> Dict[str, np.ndarray]:
+        """
+        Read metrics and return only values, should avoid some Python loops
+        """
+        # Execute one RDMA read operation from all active memory regions
+        results = self.rdma.execute()
+        metrics: Dict[str, MetricsPage] = {}
+
+        # Loop over memory regions
+        for i in range(len(results)):
+            # This is now one MR
+            data_region = results[i]
+            # This is the corresponding control information
+            control_region = self.control_info[i]
+            
+            # Loop over pages in the memory region
+            for j in range(len(control_region)):
+                pod_id = control_region[j]["pod_id"]
+                page_occupancy = control_region[j]["num_metrics"]
+                page_size_bytes = control_region[j]["page_size_bytes"]
+                
+                # Read page data
+                raw_page = data_region[j*page_size_bytes:(j+1)*page_size_bytes]   
+                
+                self.logger.debug(f"📊 LMAP {self.collector_id} reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
+                
+                # Parse values from page
+                mp = MetricsPage.from_bytes(raw_page, page_occupancy).get_metrics_values()
+                
+                # Add metrics to collection
+                metrics.setdefault(pod_id, []).append(mp)
+
+        # Perform concatenation once per pod rather than repeatedly
+        values: Dict[str, np.ndarray] = {}
+        for pod_id in metrics:
+            if len(metrics[pod_id]) > 1:
+                values[pod_id] = np.concatenate(metrics[pod_id])
+            else:
+                values[pod_id] = metrics[pod_id][0]
+
+        return values
+    
     
     def collect(self):
         """
@@ -85,35 +159,37 @@ class LMAP:
         try:
             # Read metrics using RDMA
             self.logger.debug(f"🔭 LMAP {self.collector_id} received scrape request, starting metrics reading")
-            raw_metrics = self._local_metrics_reading()
+            metrics_pages = self._read_metrics()
             
             # Loop over pods
-            for pod_id, raw in raw_metrics.items():
-                # Loop over metrics
-                for metric_tuple in raw:
-                    # Extract metric name, type, and value
-                    metric_name, metric_type, value = metric_tuple
-                    
-                    # Process raw metrics into Prometheus format
-                    if metric_type == METRIC_TYPE_COUNTER:
-                        metric = CounterMetricFamily(
-                            name=f"{self.collector_id}_{metric_name}",  # TODO dirty trick to have same registry export same metric name
-                            documentation=f"Counter metric {metric_name}",
-                            labels=['pod_id', 'collector_id']
-                        )
-                    elif metric_type == METRIC_TYPE_GAUGE:
-                        metric = GaugeMetricFamily(
-                            name=f"{self.collector_id}_{metric_name}", # TODO dirty trick to have same registry export same metric name
-                            documentation=f"Gauge metric {metric_name}",
-                            labels=['pod_id', 'collector_id']
-                        )
-                    
-                    # Add pod_id and collector_id as labels
-                    metric.add_metric([pod_id, self.collector_id], value)
-                    prom_metrics.append(metric)
-            
+            for pod_id, pages in metrics_pages.items():
+                # Loop over pages
+                for p in pages:
+                    # Loop over metrics
+                    # Get the three arrays from get_metrics()
+                    names, types, values = p.get_metrics()
+                    for metric_name, metric_type, value in zip(names, types, values):
+                        
+                        # Process raw metrics into Prometheus format
+                        if metric_type == METRIC_TYPE_COUNTER:
+                            metric = CounterMetricFamily(
+                                name=f"{self.collector_id}_{metric_name}",  # TODO dirty trick to have same registry export same metric name
+                                documentation=f"Counter metric {metric_name}",
+                                labels=['pod_id', 'collector_id']
+                            )
+                        elif metric_type == METRIC_TYPE_GAUGE:
+                            metric = GaugeMetricFamily(
+                                name=f"{self.collector_id}_{metric_name}", # TODO dirty trick to have same registry export same metric name
+                                documentation=f"Gauge metric {metric_name}",
+                                labels=['pod_id', 'collector_id']
+                            )
+                        
+                        # Add pod_id and collector_id as labels
+                        metric.add_metric([pod_id, self.collector_id], value)
+                        prom_metrics.append(metric)
+                
         except Exception as e:
-            self.logger.error(f"Error collecting metrics in LMAP {self.collector_id}: {e}")
+            self.logger.error(f"⛔️ Error collecting metrics in LMAP {self.collector_id}: {e}")
         
         return prom_metrics
     
@@ -127,12 +203,16 @@ class LMAP:
             while self.running:
                 try:
                     # Read metrics
-                    metrics = self._local_metrics_reading()
+                    metrics = self._read_metric_values()
                     
-                    # Update cache with thread safety
-                    # with self.metrics_lock:
-                    #     self.metrics_cache = metrics
-                    
+                    # Assign metrics to correct classifier
+                    for pod_id, pod_metrics in metrics.items():
+                        
+                        # Run the classifier if present
+                        c = self.classifiers.get(pod_id)
+                        if c:
+                            c.classify(pod_metrics)
+                
                     # Wait for next iteration
                     time.sleep(self.scrape_interval)
                     

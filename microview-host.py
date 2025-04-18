@@ -274,7 +274,7 @@ class MicroviewHostAgent:
                     # return control-info to the caller   
                     control_region.append({
                         "pod_id": pod_id,
-                        "pages": page_occupancy,
+                        "num_metrics": page_occupancy,
                         "page_size_bytes": self.mem_mgmt.page_size,
                     })
                 res.append(control_region)
