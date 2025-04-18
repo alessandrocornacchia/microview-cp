@@ -330,6 +330,14 @@ if __name__ == "__main__":
 
     
     ## --------- quick tests -----------
+
+    def keep_alive():
+        """Keep the main thread alive"""
+        logger.info("Press Ctrl+C to exit")
+        while True:
+            time.sleep(120)
+
+
     def test_setup(args):
         """Test function to verify MicroView setup"""
         try:
@@ -365,8 +373,12 @@ if __name__ == "__main__":
             # Configure collectors (this call will also register the LMAPs with Prometheus)
             uview.configure_lmaps(start_local_scrape=True)
 
+            keep_alive()    
+
+        except KeyboardInterrupt:
+            logger.info("Shutting down...")
         except Exception as e:
-            logger.error(f"MicroView read test failed: {e}")
+            logger.error(f"❌ MicroView read test failed: {e}")
             raise e
         finally:
             uview.cleanup()
@@ -375,17 +387,12 @@ if __name__ == "__main__":
     def test_with_prometheus(args): 
         # Create the MicroView collector instance
         uview = test_microview_read(args)
-        
-        try:
+         # Start the Prometheus HTTP server
+        start_http_server(args.prometheus_port)
+        logger.info(f"Prometheus metrics server started on port {args.prometheus_port}")
 
-            # Start the Prometheus HTTP server
-            start_http_server(args.prometheus_port)
-            logger.info(f"Prometheus metrics server started on port {args.prometheus_port}")
-            
-            # Keep the main thread alive
-            while True:
-                time.sleep(10)
-                
+        try:
+            keep_alive()        
         except KeyboardInterrupt:
             logger.info("Shutting down...")
         except Exception as e:
@@ -412,9 +419,7 @@ if __name__ == "__main__":
             
             # Keep the main thread alive
             try:
-                print("Press Ctrl+C to exit")
-                while True:
-                    time.sleep(100)
+                keep_alive()
             except KeyboardInterrupt:
                 logger.info("Shutting down...")
                 
