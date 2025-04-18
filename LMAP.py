@@ -131,10 +131,10 @@ class LMAP:
                 self.logger.debug(f"📊 LMAP {self.collector_id} reading page {j} for pod {pod_id} with occupancy {page_occupancy}")
                 
                 # Parse values from page
-                mp = MetricsPage.from_bytes(raw_page, page_occupancy).get_metrics_values()
+                values = MetricsPage.from_bytes(raw_page, page_occupancy).get_metrics_values()
                 
                 # Add metrics to collection
-                metrics.setdefault(pod_id, []).append(mp)
+                metrics.setdefault(pod_id, []).append(values)
 
         # Perform concatenation once per pod rather than repeatedly
         values: Dict[str, np.ndarray] = {}
@@ -204,12 +204,14 @@ class LMAP:
                 try:
                     # Read metrics
                     metrics = self._read_metric_values()
-                    
+                    self.logger.debug(f"📊 LMAP {self.collector_id} read metrics: {metrics}"
+                                      )
                     # Assign metrics to correct classifier
                     for pod_id, pod_metrics in metrics.items():
                         
                         # Run the classifier if present
                         c = self.classifiers.get(pod_id)
+                        
                         if c:
                             c.classify(pod_metrics)
                 
@@ -218,7 +220,7 @@ class LMAP:
                     
                 except Exception as e:
                     self.logger.error(f"Error in LMAP {self.collector_id} scrape loop: {e}")
-                    time.sleep(1)  # Short delay before retrying
+                    raise e
         
         self.running = True
         self.thread = threading.Thread(target=scrape_loop, name=f"LMAP-{self.collector_id}")

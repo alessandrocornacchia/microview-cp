@@ -216,7 +216,7 @@ class MicroView(MicroViewBase):
                 rdma=rdma,
             )
             
-            lmap.set_classifier(model=Models.FREQUENT_DIRECTION)
+            lmap.set_classifier(model=Models.FREQUENT_DIRECTION, bootstrap=True)
             
             # Add to list of collectors
             self.lmaps.append(lmap)
