@@ -313,7 +313,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MicroView NIC Collector")
     parser.add_argument("--control-plane", "-c", required=True, help="Control plane URL")
     parser.add_argument("--prometheus-port", type=int, default=8000, help="Prometheus HTTP server port")
-    parser.add_argument("--scrape-interval", "-i", type=int, default=1, help="Local scrape interval in seconds")
+    parser.add_argument("--scrape-interval", "-i", type=float, default=1., help="Local scrape interval in seconds")
     parser.add_argument("--lmaps", "-l", type=int, default=1, help="Number of LMAP collectors")
     parser.add_argument("--dev", "-d", type=str, default=DEFAULT_RDMA_DEVICE, help="RDMA device name")
     parser.add_argument("--ib-port", type=int, default=DEFAULT_IB_PORT, help="RDMA IB port")
