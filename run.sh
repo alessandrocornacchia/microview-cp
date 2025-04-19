@@ -110,6 +110,7 @@ log "- Local host: $LOCAL_PUBLIC_IP:$LOCAL_PORT"
 log "- Remote collector: $REMOTE_HOST:$REMOTE_PORT"
 log "- Metrics clients: $NUM_PODS with $NUM_METRICS metrics each"
 log "- LMAP collectors: $NUM_LMAPS"
+log "- Scraping interval: $UVIEW_SCRAPING_INTERVAL seconds"
 log "- RDMA device: $IPU_RDMA_DEVICE"
 log "- Logs directory: $LOGS_DIR"
 

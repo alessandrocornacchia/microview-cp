@@ -214,6 +214,7 @@ class MicroView(MicroViewBase):
                 collector_id=f"LMAP_{i}",
                 control_info=CRs,
                 rdma=rdma,
+                scrape_interval=self.scrape_interval,
             )
             
             lmap.set_classifier(model=Models.FREQUENT_DIRECTION, bootstrap=True)

@@ -28,7 +28,7 @@ class LMAP:
     def __init__(self, collector_id: str,
                  control_info: List[List[Dict]],
                  rdma: OneSidedReader,
-                 scrape_interval: int = DEFAULT_POLL_INTERVAL):
+                 scrape_interval: int):
         """
         Initialize the LMAP collector
         
