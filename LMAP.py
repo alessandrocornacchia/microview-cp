@@ -44,7 +44,7 @@ class LMAP:
         self.running = False
         self.thread = None
         self.logger = logging.getLogger(f'MicroviewNIC.{collector_id}')
-
+        self.statistics = {}
         self.classifiers: Dict[str, Any] = {}
         
         
@@ -200,6 +200,8 @@ class LMAP:
         """
         def scrape_loop():
             self.logger.info(f"LMAP {self.collector_id} entering local scrape loop with interval={self.scrape_interval}s")
+            num_scrapes = 0
+            self.statistics["num_scrapes"] = num_scrapes
             while self.running:
                 try:
                     # Read metrics
@@ -215,12 +217,15 @@ class LMAP:
                         if c:
                             c.classify(pod_metrics)
                 
+                    num_scrapes += 1
                     # Wait for next iteration
                     time.sleep(self.scrape_interval)
-                    
+                
                 except Exception as e:
                     self.logger.error(f"Error in LMAP {self.collector_id} scrape loop: {e}")
                     raise e
+                
+            self.statistics["num_scrapes"] = num_scrapes
         
         self.running = True
         self.thread = threading.Thread(target=scrape_loop, name=f"LMAP-{self.collector_id}")
@@ -237,9 +242,37 @@ class LMAP:
             self.logger.info(f"LMAP {self.collector_id} scrape thread stopped")
 
 
+    def dump_statistics(self, filename: Optional[str] = None):
+        """Dump statistics to logger"""
+        self.logger.info(f"LMAP {self.collector_id} statistics: {self.statistics}")
+        
+        for key, value in self.statistics.items():
+            if isinstance(value, list):
+                self.statistics["Average" + key] = np.mean(value)
+                self.statistics["Max" + key] = np.max(value)
+                self.statistics["Min" + key] = np.min(value)
+                self.statistics["Std" + key] = np.std(value)
+                del self.statistics[key]
+
+
+        if filename:
+            # write to csv
+            with open(filename, 'w') as f:
+                for key, value in self.statistics.items():
+                    f.write(f"{key},{value}\n")
+        
+        self.logger.info("=========== Statistics ==============")
+        self.logger.info("Key\tValue")
+        self.logger.info("=====================================")
+        for key, value in self.statistics.items():
+            self.logger.info(f"{key}\t{value}")
+        self.logger.info("=====================================")
+
+
     def cleanup(self):
         """Clean up resources"""
         self.stop_local_scrape_loop()
+        self.dump_statistics("stats.csv")
         if self.rdma:
             self.rdma.cleanup()
         self.logger.info(f"LMAP {self.collector_id} cleaned up")

@@ -141,7 +141,7 @@ echo "python microview-nic.py \
 -d $IPU_RDMA_DEVICE \
 --gid $IPU_RDMA_GID \
 --ib-port $IPU_RDMA_IB_PORT \
--i $UVIEW_SCRAPING_INTERVAL \
+-s $UVIEW_SCRAPING_INTERVAL \
 --test $EXPERIMENT_MODE \
 $([ "$DEBUG" = true ] && echo "--debug") &> ./logs/microview_collector.log & echo \$!" >> "/tmp/remote_script.sh"
 

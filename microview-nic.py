@@ -313,13 +313,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MicroView NIC Collector")
     parser.add_argument("--control-plane", "-c", required=True, help="Control plane URL")
     parser.add_argument("--prometheus-port", type=int, default=8000, help="Prometheus HTTP server port")
-    parser.add_argument("--scrape-interval", "-i", type=float, default=1., help="Local scrape interval in seconds")
+    parser.add_argument("--scrape-interval", "-s", type=float, default=1., help="Local scrape interval in seconds")
     parser.add_argument("--lmaps", "-l", type=int, default=1, help="Number of LMAP collectors")
     parser.add_argument("--dev", "-d", type=str, default=DEFAULT_RDMA_DEVICE, help="RDMA device name")
     parser.add_argument("--ib-port", type=int, default=DEFAULT_IB_PORT, help="RDMA IB port")
     parser.add_argument("--gid", type=int, default=DEFAULT_GID, help="RDMA GID index")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--test", type=str, help="Run test function")
+    parser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
 
     
     args = parser.parse_args()
@@ -368,7 +369,8 @@ if __name__ == "__main__":
             
             uview = test_setup(args)
             
-            input("Waiting for metrics control region. Press Enter to continue...")
+            if args.interactive:
+                input("Waiting for metrics control region. Press Enter to continue...")
             
             # Configure collectors (this call will also register the LMAPs with Prometheus)
             uview.configure_lmaps(start_local_scrape=True)
@@ -391,7 +393,8 @@ if __name__ == "__main__":
             # Create a MicroView collector instance with multiple collectors
             uview = test_setup(args)
             
-            input("Waiting for metrics control region. Press Enter to continue...")
+            if args.interactive:
+                input("Waiting for metrics control region. Press Enter to continue...")
             
             # Configure collectors (this call will also register the LMAPs with Prometheus)
             uview.configure_lmaps()
