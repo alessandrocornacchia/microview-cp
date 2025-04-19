@@ -115,9 +115,6 @@ class MetricsPage:
         # Create a new instance
         page = cls.__new__(cls)
 
-        print(f"Page bytes: {len(raw_bytes)}, Element size : {metric_dtype.itemsize}, Num entries: {num_entries}")
-
-
         # Directly create the structured array from the raw bytes
         page.raw = np.frombuffer(raw_bytes, dtype=metric_dtype)
         page.max_metrics = len(page.raw)

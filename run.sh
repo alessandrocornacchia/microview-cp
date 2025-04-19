@@ -24,6 +24,10 @@ IPU_RDMA_DEVICE=${IPU_RDMA_DEVICE:-"mlx5_3"}
 IPU_RDMA_IB_PORT=${IPU_RDMA_IB_PORT:-1}
 IPU_RDMA_GID=${IPU_RDMA_GID:-1}
 WAIT_TIME=${WAIT_TIME:-5} # time to wait before starting apps
+
+# time to wait before killing the remote collector (useful if SmartNIC becomes not responsive)
+WATCHDOG_TIMER=${WATCHDOG_TIMER:-600} 
+
 MYUSER=${MYUSER:-$(whoami)}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-"uview"}  # Conda environment name
  
@@ -72,7 +76,7 @@ cleanup() {
   
   # Wait a moment for processes to clean up before force killing
   # here they might be dumpting data to the disk
-  sleep 5
+  sleep 30
   
   # Force kill any remaining processes
   [[ -n $HOST_PID ]] && kill -9 $HOST_PID 2>/dev/null || true
@@ -170,7 +174,12 @@ echo "python microview-nic.py \
 --ib-port $IPU_RDMA_IB_PORT \
 -s $UVIEW_SCRAPING_INTERVAL \
 --test $EXPERIMENT_MODE \
-$([ "$DEBUG" = true ] && echo "--debug") &> ./logs/microview_collector.log & echo \$!" >> "/tmp/remote_script.sh"
+$([ "$DEBUG" = true ] && echo "--debug") &> ./logs/microview_collector.log &" >> "/tmp/remote_script.sh"
+echo "MICROVIEW_COLLECTOR_PID=\$!" >> "/tmp/remote_script.sh"
+echo "echo \$MICROVIEW_COLLECTOR_PID" >> "/tmp/remote_script.sh"
+# if the smartnic is not responsive this is a life saver to kill after a while
+echo "sleep $WATCHDOG_TIMER && kill -9 \$MICROVIEW_COLLECTOR_PID" >> "/tmp/remote_script.sh"
+
 
 
 # Execute the script on the remote machine, and store the PID to kill later

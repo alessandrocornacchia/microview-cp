@@ -61,8 +61,6 @@ class SubspaceAnomalyDetector(ModelBuilder):
         if kwargs['k'] > kwargs['ell']:
             raise ValueError("k cannot be greater than ell")
         
-        print(kwargs['d'], kwargs['ell'], kwargs['k'], kwargs['model'])
-
         model = kwargs.get('model', "FD")  # default model for storing history
         if model == "FD":
             sketch = FrequentDirections

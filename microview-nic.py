@@ -205,7 +205,7 @@ class MicroView(MicroViewBase):
             # Create a dedicated RDMA reader for this collector targeting selected MRs
             rdma = OneSidedReader(
                 self.qp_pool.pd,
-                self.qp_pool.get_qp_object(i % DEFAULT_QP_POOL_SIZE),
+                self.qp_pool.get_qp_object(i % self.num_collectors),
                 MRs
             )
             

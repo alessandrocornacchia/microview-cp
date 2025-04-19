@@ -4,7 +4,7 @@ import os
 
 nmetrics = [1, 100, 100, 1000]
 nmetrics = [64]
-num_pods = 1
+num_pods = 2
 METRIC_SIZE_BYTES = 64
 
 for n in nmetrics:
@@ -20,7 +20,7 @@ for n in nmetrics:
     # each pod gets one MR -> different LMAPs will read different MRs
     os.environ["DEFAULT_RDMA_MR_SIZE"] = str(1 *page_size)  
     
-    os.environ["UVIEW_SCRAPING_INTERVAL"] = "0"
+    os.environ["UVIEW_SCRAPING_INTERVAL"] = "1"
 
     # os.environ["EXPERIMENT_DURATION"] = "60"
     os.environ["DEBUG"] = "false"
