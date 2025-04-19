@@ -238,7 +238,8 @@ class LMAP:
                     self.statistics["num_scrapes"] += 1
 
                     # Wait for next iteration
-                    time.sleep(self.scrape_interval)
+                    if self.scrape_interval > 0:
+                        time.sleep(self.scrape_interval)
                 
                 except Exception as e:
                     self.logger.error(f"Error in LMAP {self.collector_id} scrape loop: {e}")

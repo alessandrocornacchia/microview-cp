@@ -38,6 +38,22 @@ EXPERIMENT_DURATION=${EXPERIMENT_DURATION:-0}
 mkdir -p $LOGS_DIR
 
 # ---------- functions ----------
+
+# Rename statistics files on remote machine if EXPERIMENT_LABEL is non empty
+handle_results() {
+  if [ -n "$EXPERIMENT_LABEL" ]; then
+
+    log "Renaming statistics files for experiment: $EXPERIMENT_LABEL"
+
+    ssh $REMOTE_HOST "cd $MYUSER/microview-cp/ \
+    && mkdir -p ./results/$EXPERIMENT_LABEL \
+    && mv ./stats_*.csv ./results/$EXPERIMENT_LABEL/ \
+    && mv ./logs/microview_collector.log ./results/$EXPERIMENT_LABEL/ \
+    && echo \"Statistics files moved to ./results/$EXPERIMENT_LABEL/\" 
+    "
+  fi
+}
+
 # Log function with timestamp
 log() {
   echo "[$(date +%T)] $1" | tee -a "${LOGS_DIR}/main.log"
@@ -56,7 +72,7 @@ cleanup() {
   
   # Wait a moment for processes to clean up before force killing
   # here they might be dumpting data to the disk
-  sleep 30
+  sleep 5
   
   # Force kill any remaining processes
   [[ -n $HOST_PID ]] && kill -9 $HOST_PID 2>/dev/null || true
@@ -65,7 +81,10 @@ cleanup() {
   done
   [[ -n $REMOTE_PID ]] && ssh $REMOTE_HOST "kill -9 $REMOTE_PID" 2>/dev/null || true
   
+  handle_results
+
   echo "All processes terminated"
+
 }
 
 # shortcut to activate conda env
@@ -78,12 +97,13 @@ _conda() {
     echo "Conda environment already activated: $CONDA_DEFAULT_ENV"
   fi
 }
+
 # ---------- functions ----------
 
 
 
 # Set up trap
-trap cleanup EXIT INT TERM
+trap cleanup INT TERM
 
 log "Starting MicroView distributed system:"
 log "- Local host: $LOCAL_PUBLIC_IP:$LOCAL_PORT"
@@ -171,21 +191,12 @@ if [ $EXPERIMENT_DURATION -gt 0 ]; then
   log "Running for $EXPERIMENT_DURATION seconds..."
   tail -f "${LOGS_DIR}/host.log" & #"${LOGS_DIR}/client_"*.log
   sleep $EXPERIMENT_DURATION
+  cleanup
 else
   log "Press Ctrl+C to stop"
   tail -f "${LOGS_DIR}/host.log" #"${LOGS_DIR}/client_"*.log
 fi
 
 
-# Rename statistics files on remote machine if EXPERIMENT_LABEL is non empty
-if [ -n "$EXPERIMENT_LABEL" ]; then
-
-  log "Renaming statistics files for experiment: $EXPERIMENT_LABEL"
-
-  ssh $REMOTE_HOST "cd /$MYUSER/microview-cp/ \
-  && mkdir -p ./results/$EXPERIMENT_LABEL \
-  && mv ./stats_*.csv ./results/$EXPERIMENT_LABEL/ \
-  && mv ./logs/microview_collector.log ./results/$EXPERIMENT_LABEL/
-  && echo \"Statistics files moved to ./results/$EXPERIMENT_LABEL/\" \
-fi
-
+handle_results
+  
