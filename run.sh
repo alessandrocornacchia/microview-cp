@@ -9,15 +9,25 @@ set -e  # Exit on error
 LOCAL_HOST=${LOCAL_HOST:-"0.0.0.0"}
 LOCAL_PORT=${LOCAL_PORT:-5000}
 LOCAL_PUBLIC_IP=${LOCAL_PUBLIC_IP:-$(hostname -I | awk '{print $1}')}  # Automatically get local IP
-REMOTE_HOST=${REMOTE_HOST:-"user@remote-machine"}  # Change this to your remote machine
+REMOTE_HOST=${REMOTE_HOST:-"ubuntu@192.168.100.2"}  # Change this to your remote machine
 REMOTE_PORT=${REMOTE_PORT:-8000}
-NUM_METRICS=${NUM_METRICS:-10}
-NUM_CLIENTS=${NUM_CLIENTS:-2}
-NUM_LMAPS=${NUM_LMAPS:-2}
+
+
+NUM_METRICS=${NUM_METRICS:-64}  # Number of metrics per pod (default they fill 1 metric page)
+NUM_PODS=${NUM_PODS:-1}         # Number of pods 
+NUM_LMAPS=${NUM_LMAPS:-1}       # Number of LMAP collectors
+UVIEW_SCRAPING_INTERVAL=${UVIEW_SCRAPING_INTERVAL:-1}  # Interval for scraping metrics
+
 DEBUG=${DEBUG:-true}
 LOGS_DIR=${LOGS_DIR:-"./logs"}
-RDMA_DEVICE=${RDMA_DEVICE:-"mlx5_1"}
-WAIT_TIME=${WAIT_TIME:-5}
+IPU_RDMA_DEVICE=${IPU_RDMA_DEVICE:-"mlx5_3"}
+IPU_RDMA_IB_PORT=${IPU_RDMA_IB_PORT:-1}
+IPU_RDMA_GID=${IPU_RDMA_GID:-1}
+WAIT_TIME=${WAIT_TIME:-5} # time to wait before starting apps
+MYUSER=${MYUSER:-$(whoami)}
+CONDA_ENV_NAME=${CONDA_ENV_NAME:-"uview"}  # Conda environment name
+ # Experiment mode: either "prometheus", "read_loop" or "setup"
+EXPERIMENT_MODE=${EXPERIMENT_MODE:-"prometheus"}
 
 # Create logs directory if it doesn't exist
 mkdir -p $LOGS_DIR
@@ -51,6 +61,17 @@ cleanup() {
   
   echo "All processes terminated"
 }
+
+# shortcut to activate conda env
+_conda() {
+  if [ -z "$CONDA_DEFAULT_ENV" ]; then
+    echo "Activating conda environment: $CONDA_ENV_NAME"
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate $CONDA_ENV_NAME
+  else
+    echo "Conda environment already activated: $CONDA_DEFAULT_ENV"
+  fi
+}
 # ---------- functions ----------
 
 
@@ -61,16 +82,19 @@ trap cleanup EXIT INT TERM
 log "Starting MicroView distributed system:"
 log "- Local host: $LOCAL_PUBLIC_IP:$LOCAL_PORT"
 log "- Remote collector: $REMOTE_HOST:$REMOTE_PORT"
-log "- Metrics clients: $NUM_CLIENTS with $NUM_METRICS metrics each"
+log "- Metrics clients: $NUM_PODS with $NUM_METRICS metrics each"
 log "- LMAP collectors: $NUM_LMAPS"
-log "- RDMA device: $RDMA_DEVICE"
+log "- RDMA device: $IPU_RDMA_DEVICE"
 log "- Logs directory: $LOGS_DIR"
 
 
+# Step 0: Activate conda environment
+_conda
 
 # 1. Start host agent on local machine
 log "Starting MicroView host agent..."
-python microview-host.py --rdma --host $LOCAL_HOST --port $LOCAL_PORT $([ "$DEBUG" = true ] && echo "--debug") > "${LOGS_DIR}/host.log" 2>&1 &
+
+python microview-host.py --rdma-queues $NUM_LMAPS --host $LOCAL_HOST --port $LOCAL_PORT $([ "$DEBUG" = true ] && echo "--debug") > "${LOGS_DIR}/host.log" 2>&1 &
 HOST_PID=$!
 log "Host agent started with PID $HOST_PID"
 
@@ -83,9 +107,9 @@ sleep $WAIT_TIME
 
 
 # 2. Start metrics clients on local machine
-log "Starting $NUM_CLIENTS metrics clients with $NUM_METRICS metrics each..."
+log "Starting $NUM_PODS metrics clients with $NUM_METRICS metrics each..."
 CLIENT_PIDS=()
-for i in $(seq 1 $NUM_CLIENTS); do
+for i in $(seq 1 $NUM_PODS); do
   python libmicroview.py --num-metrics $NUM_METRICS --update-metrics $([ "$DEBUG" = true ] && echo "--debug") > "${LOGS_DIR}/client_${i}.log" 2>&1 &
   CLIENT_PID=$!
   CLIENT_PIDS+=($CLIENT_PID)
@@ -102,22 +126,37 @@ sleep $WAIT_TIME
 
 # 3. Start collector on remote machine via SSH
 log "Starting MicroView NIC collector on remote machine..."
-# Copy a small script to run the collector and get its PID
-ssh $REMOTE_HOST "cd ~/microview-cp && python microview-nic.py \
-  --control-plane $LOCAL_PUBLIC_IP:$LOCAL_PORT \
-  --port $REMOTE_PORT \
-  --lmaps $NUM_LMAPS \
-  --test with_prometheus_multithread \
-  $([ "$DEBUG" = true ] && echo "--debug") > ~/microview_collector.log 2>&1 & echo \$!" > "${LOGS_DIR}/remote_pid.txt"
 
-REMOTE_PID=$(cat "${LOGS_DIR}/remote_pid.txt")
+# Create empty file first
+> "/tmp/remote_script.sh"
+
+# Create the remote script
+echo "cd $MYUSER/microview-cp" >> "/tmp/remote_script.sh"
+echo "git pull" >> "/tmp/remote_script.sh"
+echo "if [ ! -d "logs" ]; then mkdir logs ; fi" >> "/tmp/remote_script.sh"
+echo "conda activate $CONDA_ENV_NAME" >> "/tmp/remote_script.sh"
+echo "python microview-nic.py \
+-c $LOCAL_PUBLIC_IP:$LOCAL_PORT \
+-l $NUM_LMAPS \
+-d $IPU_RDMA_DEVICE \
+--gid $IPU_RDMA_GID \
+--ib-port $IPU_RDMA_IB_PORT \
+-i $UVIEW_SCRAPING_INTERVAL \
+--test $EXPERIMENT_MODE \
+$([ "$DEBUG" = true ] && echo "--debug") &> ./logs/microview_collector.log & echo \$!" >> "/tmp/remote_script.sh"
+
+
+# Execute the script on the remote machine, and store the PID to kill later
+ssh $REMOTE_HOST bash -ls < /tmp/remote_script.sh > "${LOGS_DIR}/.remote_pid.txt"
+
+REMOTE_PID=$(cat "${LOGS_DIR}/.remote_pid.txt")
 log "Remote NIC collector started with PID $REMOTE_PID"
 
 
 log "All components started:"
 log "- Host agent: logs in ${LOGS_DIR}/host.log"
 log "- Clients: logs in ${LOGS_DIR}/client_*.log"
-log "- Collector: logs on remote machine at ~/microview_collector.log"
+log "- Collector: logs on remote machine at ./logs/microview_collector.log"
 log "- Prometheus metrics available at http://$REMOTE_HOST:$REMOTE_PORT"
 log "Press Ctrl+C to stop all processes"
 
