@@ -217,8 +217,8 @@ class LMAP:
 
         def scrape_loop():
             self.logger.info(f"LMAP {self.collector_id} entering local scrape loop with interval={self.scrape_interval}s")
-            num_scrapes = 0
-            self.statistics["num_scrapes"] = num_scrapes
+            
+            self.statistics["num_scrapes"] = 0
             while self.running:
                 try:
                     # Read metrics
@@ -228,13 +228,15 @@ class LMAP:
                     # Assign metrics to correct classifier
                     for pod_id, pod_metrics in metrics.items():
                         
-                        # Run the classifier if present
+                        # Run the pod classifier if present
                         c = self.classifiers.get(pod_id)
                         
                         if c:
                             c.classify(pod_metrics)
                 
-                    num_scrapes += 1
+                    # Update statistics
+                    self.statistics["num_scrapes"] += 1
+
                     # Wait for next iteration
                     time.sleep(self.scrape_interval)
                 
@@ -242,8 +244,6 @@ class LMAP:
                     self.logger.error(f"Error in LMAP {self.collector_id} scrape loop: {e}")
                     raise e
                 
-            self.statistics["num_scrapes"] = num_scrapes
-        
         self.running = True
         self.thread = threading.Thread(target=scrape_loop, name=f"LMAP-{self.collector_id}")
         self.thread.daemon = True  # Thread will exit when main program exits
