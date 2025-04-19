@@ -10,6 +10,8 @@ __pycache__/**
 *.log
 **.csv
 
+logs/**
+
 # ignore here as they are linux links
 **/docker/utils.py
 **/docker/libmicroview.py
