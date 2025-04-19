@@ -76,7 +76,7 @@ cleanup() {
   
   # Wait a moment for processes to clean up before force killing
   # here they might be dumpting data to the disk
-  sleep 30
+  sleep 10
   
   # Force kill any remaining processes
   [[ -n $HOST_PID ]] && kill -9 $HOST_PID 2>/dev/null || true
@@ -176,9 +176,10 @@ echo "python microview-nic.py \
 --test $EXPERIMENT_MODE \
 $([ "$DEBUG" = true ] && echo "--debug") &> ./logs/microview_collector.log &" >> "/tmp/remote_script.sh"
 echo "MICROVIEW_COLLECTOR_PID=\$!" >> "/tmp/remote_script.sh"
+# TODO if the smartnic is not responsive this is a life saver to kill after a while
+# TODO echo "(sleep $WATCHDOG_TIMER; kill -9 \$MICROVIEW_COLLECTOR_PID) &" >> "/tmp/remote_script.sh"
+# important: pid is needed to kill the process later, this must be last line
 echo "echo \$MICROVIEW_COLLECTOR_PID" >> "/tmp/remote_script.sh"
-# if the smartnic is not responsive this is a life saver to kill after a while
-echo "sleep $WATCHDOG_TIMER && kill -9 \$MICROVIEW_COLLECTOR_PID" >> "/tmp/remote_script.sh"
 
 
 

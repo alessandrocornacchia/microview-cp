@@ -4,7 +4,7 @@ import os
 
 nmetrics = [1, 100, 100, 1000]
 nmetrics = [64]
-num_pods = 2
+num_pods = 1
 METRIC_SIZE_BYTES = 64
 
 for n in nmetrics:
