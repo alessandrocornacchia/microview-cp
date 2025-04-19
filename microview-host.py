@@ -451,6 +451,24 @@ class MicroviewHostAgent:
     
     def start(self, rdma_device: str = DEFAULT_RDMA_DEVICE):
         """Start the Microview Host Agent"""
+
+        """Start the Microview Host Agent"""
+    
+        # Import signal module at the beginning of the function
+        import signal
+        import sys
+        
+        # Define signal handler function (useful when launched in non interactive shells)
+        def signal_handler(sig, frame):
+            logger.info(f"Received signal {sig}, shutting down gracefully...")
+            # Cleanup resources before exiting
+            self.cleanup()
+            sys.exit(0)
+        
+        # Register the signal handler for SIGTERM and SIGINT
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        
         try:
             self._init_rdma(self.num_qps, rdma_device)
             logger.info(f"Starting REST API on {self.host}:{self.api_port}")
@@ -461,6 +479,7 @@ class MicroviewHostAgent:
             logger.error(f"Error in start: {str(e)}", exc_info=True)
         finally:
             self.cleanup()
+
 
     def cleanup(self):
         logger.info("Cleaning up resources")

@@ -362,7 +362,7 @@ if __name__ == "__main__":
             raise e
 
     # -----------
-    def test_microview_read(args):
+    def test_read_loop(args):
         """Test function to verify MicroView read operation"""
         try:
             
