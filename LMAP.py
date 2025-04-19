@@ -43,7 +43,7 @@ class LMAP:
         self.scrape_interval = scrape_interval
         self.running = False
         self.thread = None
-        self.logger = logging.getLogger(f'MicroviewNIC.LMAP.{collector_id}')
+        self.logger = logging.getLogger(f'MicroviewNIC.{collector_id}')
 
         self.classifiers: Dict[str, Any] = {}
         

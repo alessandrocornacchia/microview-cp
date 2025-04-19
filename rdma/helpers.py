@@ -37,13 +37,6 @@ from pyverbs.addr import AHAttr
 from pyverbs.wr import SGE, RecvWR, SendWR
 from defaults import *
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('RDMAHelper')  # TODO ugly! 
-
 
 class MemoryRegionPool:
     """
@@ -92,7 +85,7 @@ class MemoryRegionPool:
         }
         
         self.memory_regions[name] = mr_info
-        logger.info(f"Registered memory region '{name}': addr={hex(addr)}, rkey={memory_region.rkey}, size={size}")
+        default_logger.info(f"Registered memory region '{name}': addr={hex(addr)}, rkey={memory_region.rkey}, size={size}")
         
         return self.get_memory_region_info(name)
 
@@ -137,11 +130,11 @@ class MemoryRegionPool:
         # Save to json file in json format
         with open(filename + '.json' if not filename.endswith('.json') else filename, 'w') as f:
             json.dump(serializable_regions, f, indent=2)
-            logger.info(f"Saved RDMA info to JSON file: {filename}")
+            default_logger.info(f"Saved RDMA info to JSON file: {filename}")
         # Save to pickle file
         with open(filename + '.pickle' if not filename.endswith('.pickle') else filename, 'wb') as f:
             pickle.dump(serializable_regions, f)
-            logger.info(f"Saved RDMA info to pickle file: {filename}")
+            default_logger.info(f"Saved RDMA info to pickle file: {filename}")
         
     
     def get_memory_region(self, name: str) -> Optional[MR]:
@@ -176,11 +169,11 @@ class MemoryRegionPool:
         """Close and clean up all memory regions"""
         for name, mr_info in list(self.memory_regions.items()):
             try:
-                logger.debug(f"Cleaning up RDMA memory region '{name}'")
+                default_logger.debug(f"Cleaning up RDMA memory region '{name}'")
                 mr_info["mr"].close()
                 del self.memory_regions[name]
             except Exception as e:
-                logger.error(f"Error cleaning up memory region '{name}': {e}")
+                default_logger.error(f"Error cleaning up memory region '{name}': {e}")
 
 
 class QueuePairPool:
@@ -225,7 +218,7 @@ class QueuePairPool:
             
             # Open device context using first device
             self.ctx = d.Context(name=self.rdma_device)
-            logger.info(f"Opened RDMA device: {self.rdma_device}")
+            default_logger.info(f"Opened RDMA device: {self.rdma_device}")
             
             # Create Protection Domain
             self.pd = PD(self.ctx)
@@ -238,7 +231,7 @@ class QueuePairPool:
             self.gid = self.ctx.query_gid(self.ib_port, self.gid_index)
             
         except Exception as e:
-            logger.error(f"Error initializing RDMA context: {e}")
+            default_logger.error(f"Error initializing RDMA context: {e}")
             raise
     
     
@@ -260,7 +253,7 @@ class QueuePairPool:
                     rcq=self.cq
                 )
                 
-                logger.debug(f"Created Queue Pair #{i} attributes")
+                default_logger.debug(f"Created Queue Pair #{i} attributes")
 
                 # Create Queue Pair
                 queue_pair = QP(self.pd, qp_init_attr)
@@ -277,7 +270,7 @@ class QueuePairPool:
                     pyverbs.enums.IBV_QP_PORT | pyverbs.enums.IBV_QP_ACCESS_FLAGS
                 )
                 
-                logger.debug(f"Queue Pair #{i} transitioned to INIT state")
+                default_logger.debug(f"Queue Pair #{i} transitioned to INIT state")
 
                 # Store QP information
                 qp_info = {
@@ -288,13 +281,13 @@ class QueuePairPool:
                 }
                 
                 self.qps.append(qp_info)
-                logger.info(f"Created Queue Pair #{i}: GID={self.gid}, qp_num={qp_info['qp_num']}")
+                default_logger.info(f"Created Queue Pair #{i}: GID={self.gid}, qp_num={qp_info['qp_num']}")
                 
             except Exception as e:
-                logger.error(f"Error creating Queue Pair #{i}: {e}")
+                default_logger.error(f"Error creating Queue Pair #{i}: {e}")
                 raise
         
-        logger.info(f"Created Queue Pair pool with {self.pool_size} QPs")
+        default_logger.info(f"Created Queue Pair pool with {self.pool_size} QPs")
     
     
     def get_qp_object(self, index: int) -> Tuple[QP,CQ]:
@@ -343,11 +336,11 @@ class QueuePairPool:
         # Save to json file in json format
         with open(filename + '.json', 'w') as f:
             json.dump(qp_info, f, indent=2)
-            logger.info(f"Saved RDMA info to JSON file: {filename}")
+            default_logger.info(f"Saved RDMA info to JSON file: {filename}")
         # Save to pickle file
         with open(filename + '.pickle', 'wb') as f:
             pickle.dump(qp_info, f)
-            logger.info(f"Saved RDMA info to pickle file: {filename}")
+            default_logger.info(f"Saved RDMA info to pickle file: {filename}")
             
 
     def connect_queue_pair(self, index: int, remote_info: Dict[str, Any]) -> bool:
@@ -376,12 +369,12 @@ class QueuePairPool:
             
             # check if Queue Pair is already in use, if yes reset state
             if local_qp["in_use"]:
-                logger.warning(f"⚠️ Queue Pair #{index} is already in use")
+                default_logger.warning(f"⚠️ Queue Pair #{index} is already in use")
                 return False
 
             qp = local_qp["qp"] 
 
-            logger.info(f"Connecting to remote QP: {remote_qp_num}, GID: {remote_gid}")
+            default_logger.info(f"Connecting to remote QP: {remote_qp_num}, GID: {remote_gid}")
 
             # Create Global Route object
             gr = GlobalRoute(dgid=remote_gid, sgid_index=self.gid_index)
@@ -408,11 +401,11 @@ class QueuePairPool:
             local_qp["remote_info"] = remote_info
             local_qp["in_use"] = True
         
-            logger.info(f"✅ Queue Pair #{index} (qp_num={local_qp['qp_num']}) connected to remote QP {remote_info['qp_num']}")
+            default_logger.info(f"✅ Queue Pair #{index} (qp_num={local_qp['qp_num']}) connected to remote QP {remote_info['qp_num']}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Error connecting Queue Pair #{index}: {e}")
+            default_logger.error(f"❌ Error connecting Queue Pair #{index}: {e}")
             return False
     
     def list_queue_pairs(self) -> List[Dict[str, Any]]:
@@ -430,7 +423,7 @@ class QueuePairPool:
             try:
                 qp_info["qp"].close()
             except Exception as e:
-                logger.error(f"Error closing QP {qp_info['qp_num']}: {e}")
+                default_logger.error(f"Error closing QP {qp_info['qp_num']}: {e}")
         
         # Clean up other resources
         if hasattr(self, 'cq') and self.cq:
@@ -442,7 +435,7 @@ class QueuePairPool:
         if hasattr(self, 'ctx') and self.ctx:
             self.ctx.close()
             
-        logger.info("RDMA resources cleaned up")
+        default_logger.info("RDMA resources cleaned up")
 
 
 # TODO use this instead of dictionary above
@@ -476,7 +469,7 @@ class OneSidedReader:
     and in RTS (Ready to Send state)
     """
 
-    def __init__(self, pd : PD, queues: Tuple[QP,CQ], remote_mrs : List[MRMetadata]):
+    def __init__(self, pd : PD, queues: Tuple[QP,CQ], remote_mrs : List[MRMetadata], id : int = None, parent: str = "MicroviewNIC"):
         """
         Initialize the one-sided reader
         
@@ -495,6 +488,9 @@ class OneSidedReader:
         self.remote_mrs = remote_mrs
         self.n_mr = len(remote_mrs)
         self.mrm = None 
+        if not id:
+            id = hash(time.time()) % 10000
+        self.logger = logging.getLogger(f'{parent}.RDMA.{id}')
         
         logging.info(f"OneSidedReader initialized with {self.n_mr} remote memory regions: {self.remote_mrs}")
         
@@ -530,7 +526,7 @@ class OneSidedReader:
                 ncomp += 1
                 results.append(res)
                 # logger.info(f"RDMA READ result for MR {i}: {res}")
-        logger.debug(f"Polled {ncomp} completions")
+        self.logger.debug(f"Polled {ncomp} completions")
         return results
 
 
@@ -557,7 +553,7 @@ class OneSidedReader:
             length = self.remote_mrs[index].length
             mr = self.mrm.get_memory_region(f"local_mr_{index}")
 
-            logger.info(f"Creating RDMA READ work request, remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
+            self.logger.info(f"Creating RDMA READ work request, remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
             # Create RDMA READ work request
             wr = SendWR(
                 opcode=pyverbs.enums.IBV_WR_RDMA_READ,
@@ -570,278 +566,73 @@ class OneSidedReader:
             # qp = qp_pool.get_qp_object(0)
             self.qp.post_send(wr)
 
-            logger.info(f"Posted RDMA READ request: remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
+            self.logger.info(f"Posted RDMA READ request: remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
             
         except Exception as e:
-            logger.error(f"Error performing RDMA READ: {e}")
+            self.logger.error(f"Error performing RDMA READ: {e}")
             raise
 
     
-    def poll_completion(self, index : int):
+    # def poll_completion(self, index : int):
+    #     """
+    #     Poll for completion of RDMA READ operation
+    #     """
+    #     res = None
+        
+    #     try:
+    #         # Poll for completion
+    #         wc_num, wcs = self.cq.poll()
+        
+    #         # if there is some content return, else None
+    #         if wc_num:
+    #             if wcs[0].status != pyverbs.enums.IBV_WC_SUCCESS:
+    #                 raise RuntimeError(f"❌ RDMA READ failed with status: {wcs[0].status}")
+                
+    #             mr = self.mrm.get_memory_region(f"local_mr_{index}")
+    #             res = mr.read(mr.length, 0)
+    #             logger.debug(f"✅ RDMA READ completed successfully: {res}")
+    #     except Exception as e:
+    #         logger.error(f"❌ Error polling CQ: {e}")
+    #         raise
+            
+    #     return res
+
+    def poll_completion(self, index: int, timeout_seconds: float = 5.0):
         """
-        Poll for completion of RDMA READ operation
+        Poll for completion of RDMA READ operation with timeout
+        
+        Args:
+            index: Index of the memory region
+            timeout_seconds: Maximum time to wait for completion in seconds
+            
+        Returns:
+            The data read from the memory region, or None if timeout
         """
         res = None
+        start_time = time.time()
         
         try:
-            # Poll for completion
-            wc_num, wcs = self.cq.poll()
-        
-            # if there is some content return, else None
-            if wc_num:
-                if wcs[0].status != pyverbs.enums.IBV_WC_SUCCESS:
-                    raise RuntimeError(f"❌ RDMA READ failed with status: {wcs[0].status}")
+            while time.time() - start_time < timeout_seconds:
+                # Poll for completion
+                wc_num, wcs = self.cq.poll()
                 
-                mr = self.mrm.get_memory_region(f"local_mr_{index}")
-                res = mr.read(mr.length, 0)
-                logger.debug(f"✅ RDMA READ completed successfully: {res}")
+                if wc_num:
+                    if wcs[0].status != pyverbs.enums.IBV_WC_SUCCESS:
+                        raise RuntimeError(f"❌ RDMA READ failed with status: {wcs[0].status}")
+                    
+                    mr = self.mrm.get_memory_region(f"local_mr_{index}")
+                    res = mr.read(mr.length, 0)
+                    self.logger.debug(f"✅ RDMA READ completed successfully for MR {index}")
+                    return res
+                
+                # No completion yet, wait a bit before polling again
+                # time.sleep(0.01)  # 10ms sleep to avoid busy-waiting
+            
+            # If we reached here, we timed out
+            self.logger.warning(f"⚠️ Timeout waiting for RDMA READ completion for MR {index}")
+            return None
+            
         except Exception as e:
-            logger.error(f"❌ Error polling CQ: {e}")
+            self.logger.error(f"❌ Error polling CQ for MR {index}: {e}")
             raise
-            
-        return res
 
-
-
-# # Handler for graceful termination
-# def signal_handler(sig, frame):
-#     logger.info("Received signal to terminate")
-#     sys.exit(0)
-
-# signal.signal(signal.SIGINT, signal_handler)
-# signal.signal(signal.SIGTERM, signal_handler)
-
-# TODO move all this to a separate test file
-
-def perform_rdma_read(qp_pool, remote_addr, rkey, length):
-    """
-    Perform an RDMA READ operation
-    
-    Args:
-        remote_addr: Remote memory address to read from
-        rkey: Remote key for the memory region
-        length: Length of data to read (defaults to buffer_size)
-        
-    Returns:
-        The data read from remote memory
-    """
-    from pyverbs.wr import SGE, RecvWR, SendWR
-
-    # Create local buffer for RDMA operations
-    buffer = np.zeros(length, dtype=np.uint8)
-
-    # Register the memory region
-    buffer_addr = buffer.ctypes.data
-    access_flags = pyverbs.enums.IBV_ACCESS_LOCAL_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_WRITE | pyverbs.enums.IBV_ACCESS_REMOTE_READ
-
-    mr = MR(qp_pool.pd, length, access_flags, buffer_addr)
-    logger.info(f"Registered local MR: addr={hex(buffer_addr)}, lkey={mr.lkey}")
-
-    
-    # Clear local buffer before read
-    buffer.fill(0)
-    
-    try:
-        
-        logger.info(f"Creating RDMA READ work request, remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
-        # Create RDMA READ work request
-        wr = SendWR(
-            opcode=pyverbs.enums.IBV_WR_RDMA_READ,
-            num_sge=1,
-            sg=[SGE(mr.buf, mr.length, mr.lkey)],            
-        )
-        wr.set_wr_rdma(rkey, remote_addr)
-
-        # Post to QP
-        qp = qp_pool.get_qp_object(0)
-        qp.post_send(wr)
-
-        logger.info(f"Posted RDMA READ request: remote_addr={hex(remote_addr)}, rkey={rkey}, length={length}")
-        
-        # Poll for completion
-        while True:
-            wc_num, wcs = qp_pool.cq.poll()
-            
-            if wc_num:
-                if wcs[0].status != pyverbs.enums.IBV_WC_SUCCESS:
-                    raise RuntimeError(f"❌ RDMA READ failed with status: {wcs[0].status}")
-                
-                content = mr.read(mr.length, 0).decode()
-                logger.info(f"✅ RDMA READ completed successfully: {content}")
-                
-                # cleanup memory region
-                mr.close()
-
-                break
-            else:
-                logger.debug("Waiting for RDMA READ completion...")
-                time.sleep(0.1)
-
-        
-        return content
-        
-    except Exception as e:
-        logger.error(f"Error performing RDMA READ: {e}")
-        raise
-
-
-
-# --------- Main entry point for  testing ------------------
-
-def test_qp_connect(args, qp_pool):
-    """"
-    Test the connection of queue pairs
-    """
-    # Save memory region info to pickle file
-    qp_pool.save_queue_pair_info(args.local_to)
-    logger.info(f"RDMA started, check {args.local_to}.json and {args.local_to}.pickle for details")
-    
-    
-    fn = input("Enter filename with remote RDMA information, or Press Enter for default: ")
-    if not fn and args.client:
-        fn = "rdma_passive_info.json"
-    if not fn and not args.client:
-        fn = "rdma_active_info.json"
-
-    # Load remote QP information from file
-    remote_info = qp_info_from_file(fn)
-    
-    # Connect to remote QP
-    for i in range(len(qp_pool.qps)):
-        try:
-            qp_pool.connect_queue_pair(i, remote_info[f"qp_{i}"])
-        except Exception as e:
-            logger.error(f"Error connecting to remote QP: {e}")
-
-
-def test_mr_read(args, qp_pool):
-    """"
-    Test a READ() operation using RDMA, with a memory region created by a passive side.
-    MR information is saved to a file for the client to use.
-    """
-    RDMA_MR_INFO_FILE = "mr_info.json"
-    
-    # Server creates default memory region
-    if not args.client:
-        mr_manager = MemoryRegionPool(qp_pool.pd, default_buffer_size=args.buffer_size)
-        mr_manager.create_memory_region("default", args.buffer_size)
-        mr_manager.save_memory_region_info(RDMA_MR_INFO_FILE)
-    
-    # both connect queue pairs
-    test_qp_connect(args, qp_pool)
-
-    # client will retrieve memory region information and issue read requests
-    if args.client:
-        # running as client for RDMA READS
-        fn = input("Enter MR filename or Press Enter to start RDMA reads...")
-        if not fn:
-            fn = RDMA_MR_INFO_FILE
-        addr, rkey, size = mr_info_from_file(fn)
-        logger.info(f"Loaded memory region info from {fn}, addr={hex(addr)}, rkey={rkey}, size={size}")
-        # Perform RDMA READ
-        data = perform_rdma_read(qp_pool, addr, rkey, size)
-        logger.info(f"Data read from remote memory: {data}")
-    else:
-        # Keep main thread alive for testing
-        try:
-            print("Waiting for RDMA reads(). Press Ctrl+C to exit.")
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Exiting RDMA server")
-            pass
-        finally:
-            mr_manager.cleanup()
-
-
-def test_one_sided_reader(args, qp_pool):
-    """"
-    Test a READ() operation using RDMA, with a memory region created by a passive side.
-    MR information is saved to a file for the client to use.
-    """
-    RDMA_MR_INFO_FILE = "mr_info.json"
-    
-    # Server creates default memory region
-    if not args.client:
-        mr_manager = MemoryRegionPool(qp_pool.pd, default_buffer_size=args.buffer_size)
-        mr_manager.create_memory_region("default", args.buffer_size)
-        mr_manager.save_memory_region_info(RDMA_MR_INFO_FILE)
-    
-    # both connect queue pairs
-    test_qp_connect(args, qp_pool)
-
-    # client will retrieve memory region information and issue read requests
-    if args.client:
-        # running as client for RDMA READS
-        fn = input("Enter MR filename or Press Enter to start RDMA reads...")
-        if not fn:
-            fn = RDMA_MR_INFO_FILE
-        addr, rkey, size = mr_info_from_file(fn)
-        logger.info(f"Loaded memory region info from {fn}, addr={hex(addr)}, rkey={rkey}, size={size}")
-        # Perform RDMA READ with one-sided reader
-        remote_mr = MRMetadata(addr, rkey, size, None)
-        one_sided_reader = OneSidedReader(qp_pool.pd, qp_pool.get_qp_object(0), [remote_mr])
-        one_sided_reader.start()
-    else:
-        # Keep main thread alive for testing
-        try:
-            print("Waiting for RDMA reads(). Press Ctrl+C to exit.")
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Exiting RDMA server")
-            pass
-        finally:
-            mr_manager.cleanup()
-
-
-if __name__ == "__main__":
-    import argparse
-    # Add parent directory to path for imports
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from utils import qp_info_from_file, mr_info_from_file
-
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="RDMA Passive Server with QP Pool")
-    parser.add_argument("-c", "--client", action="store_true", help="Run as RDMA client")
-    parser.add_argument("--qp", type=int, default=DEFAULT_QP_POOL_SIZE,
-                      help=f"Size of Queue Pair pool (default: {DEFAULT_QP_POOL_SIZE})")
-    parser.add_argument("--buffer-size", type=int, default=DEFAULT_PAGE_SIZE,
-                      help=f"Default size of memory buffers (default: {DEFAULT_PAGE_SIZE})")
-    parser.add_argument("--rdma-device", type=str, default=DEFAULT_RDMA_DEVICE,
-                        help=f"RDMA device to use (default: {DEFAULT_RDMA_DEVICE})")
-    parser.add_argument("--local-to", type=str, default="rdma_passive_info",
-                        help="File to save local RDMA information for other connections")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    
-    
-    args = parser.parse_args()
-    
-    # Set logging level
-    if args.debug:
-        logger.setLevel(logging.DEBUG)
-    
-    logger.info(f"Starting RDMA with QP pool size {args.qp}")
-    qp_pool = None
-    
-    try:
-        # Initialize QP pool
-        qp_pool = QueuePairPool(args.rdma_device, pool_size=args.qp)
-        
-        # test_mr_read(args, qp_pool)
-        # test_qp_connect(args, qp_pool) #TODO make this selection possible from commandline
-        test_one_sided_reader(args, qp_pool)
-                
-            
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    except Exception as e:
-        logger.error(f"Error: {e}")
-         # Clean up resources
-        if qp_pool:
-            qp_pool.cleanup()
-        raise
-    finally:
-        # Clean up resources
-        if qp_pool:
-            qp_pool.cleanup()

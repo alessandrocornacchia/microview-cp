@@ -14,10 +14,10 @@ from classifiers.enums import Models
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('microview_nic.log')
-    ]
+    # handlers=[
+    #     logging.StreamHandler(),
+    #     logging.FileHandler('microview_nic.log')
+    # ]
 )
 logger = logging.getLogger('MicroviewNIC')
 
@@ -383,26 +383,9 @@ if __name__ == "__main__":
         finally:
             uview.cleanup()
     
-    # -----------
-    def test_with_prometheus(args): 
-        # Create the MicroView collector instance
-        uview = test_microview_read(args)
-         # Start the Prometheus HTTP server
-        start_http_server(args.prometheus_port)
-        logger.info(f"Prometheus metrics server started on port {args.prometheus_port}")
-
-        try:
-            keep_alive()        
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-        except Exception as e:
-            logger.error(f"Error: {e}")
-        finally:
-            uview.cleanup()
-
 
     # -----------
-    def test_with_prometheus_multithread(args):
+    def test_prometheus(args):
         """Test function to verify MicroView with Prometheus"""
         try:
             # Create a MicroView collector instance with multiple collectors
