@@ -210,7 +210,7 @@ if __name__ == "__main__":
                 latency_metric.update_value(i * 0.1)
                 i += 1
 
-                logger.info(f"Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
+                logger.info(f"Metrics updated | Requests: {requests_metric.get_value()}, Latency: {latency_metric.get_value()}")
             
             time.sleep(10)
     except KeyboardInterrupt:            

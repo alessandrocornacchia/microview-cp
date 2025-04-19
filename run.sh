@@ -27,7 +27,7 @@ WAIT_TIME=${WAIT_TIME:-5} # time to wait before starting apps
 MYUSER=${MYUSER:-$(whoami)}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-"uview"}  # Conda environment name
  # Experiment mode: either "prometheus", "read_loop" or "setup"
-EXPERIMENT_MODE=${EXPERIMENT_MODE:-"prometheus"}
+EXPERIMENT_MODE=${EXPERIMENT_MODE:-"read_loop"}
 
 # Create logs directory if it doesn't exist
 mkdir -p $LOGS_DIR
@@ -49,8 +49,9 @@ cleanup() {
   done
   [[ -n $REMOTE_PID ]] && ssh $REMOTE_HOST "kill -TERM $REMOTE_PID" 2>/dev/null || true
   
-  # Wait a moment for processes to clean up
-  sleep 2
+  # Wait a moment for processes to clean up before force killing
+  # here they might be dumpting data to the disk
+  sleep 30
   
   # Force kill any remaining processes
   [[ -n $HOST_PID ]] && kill -9 $HOST_PID 2>/dev/null || true
@@ -149,7 +150,7 @@ $([ "$DEBUG" = true ] && echo "--debug") &> ./logs/microview_collector.log & ech
 # Execute the script on the remote machine, and store the PID to kill later
 ssh $REMOTE_HOST bash -ls < /tmp/remote_script.sh > "${LOGS_DIR}/.remote_pid.txt"
 
-REMOTE_PID=$(cat "${LOGS_DIR}/.remote_pid.txt")
+REMOTE_PID=$(tail -n 1 "${LOGS_DIR}/.remote_pid.txt")
 log "Remote NIC collector started with PID $REMOTE_PID"
 
 
@@ -163,4 +164,4 @@ log "Press Ctrl+C to stop all processes"
 
 # Keep script running until user interrupts
 log "Monitoring system logs. Press Ctrl+C to stop."
-tail -f "${LOGS_DIR}/host.log" "${LOGS_DIR}/client_"*.log
+tail -f "${LOGS_DIR}/host.log" #"${LOGS_DIR}/client_"*.log
