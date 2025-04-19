@@ -1,16 +1,16 @@
 # Constants
 import logging
-# import os
+import os
 
-# def get_env(name, default, convert=lambda x: x):
-#     """Get environment variable with type conversion and fallback to default"""
-#     value = os.environ.get(name)
-#     if value is not None:
-#         try:
-#             return convert(value)
-#         except (ValueError, TypeError):
-#             logging.warning(f"Failed to convert environment variable {name}={value} to required type, using default: {default}")
-#     return default
+def get_env(name, default, convert=lambda x: x):
+    """Get environment variable with type conversion and fallback to default"""
+    value = os.environ.get(name)
+    if value is not None:
+        try:
+            return convert(value)
+        except (ValueError, TypeError):
+            logging.warning(f"Failed to convert environment variable {name}={value} to required type, using default: {default}")
+    return default
 
 # # Core configuration
 # PAGE_SIZE = get_env("PAGE_SIZE", 4096, int)
@@ -30,10 +30,10 @@ import logging
 # TODO move in config file .env
 
 # ---- memory layout ----
-DEFAULT_PAGE_SIZE = 4096
+DEFAULT_PAGE_SIZE = get_env("PAGE_SIZE", 4096, int)
 # TODO was 16 pages here
-DEFAULT_RDMA_MR_SIZE = 1 * DEFAULT_PAGE_SIZE  # 64KB maximum size for RDMA read groups
-SHM_POOL_SIZE = 10 * DEFAULT_RDMA_MR_SIZE   # 10 MR
+DEFAULT_RDMA_MR_SIZE = get_env("RDMA_MR_SIZE", 1 * DEFAULT_PAGE_SIZE, int)  # 64KB maximum size for RDMA read groups
+SHM_POOL_SIZE = get_env("SHM_POOL_SIZE", 10 * DEFAULT_RDMA_MR_SIZE, int)   # 10 MR
 SHM_POOL_NAME = "microview"
 
 # ---- RDMA settings ----

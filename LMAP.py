@@ -261,7 +261,7 @@ class LMAP:
 
     def dump_statistics(self, filename: Optional[str] = None):
         """Dump statistics to logger"""
-        self.logger.info(f"LMAP {self.collector_id} statistics: {self.statistics}")
+        self.logger.debug(f"LMAP {self.collector_id} statistics: {self.statistics}")
         
         for key, value in self.statistics.items():
             if isinstance(value, list):
@@ -278,7 +278,7 @@ class LMAP:
                 for key, value in self.statistics.items():
                     f.write(f"{key},{value}\n")
         
-        self.logger.info("=========== Statistics ==============")
+        self.logger.info(f"=========== {self.collector_id} ==============")
         self.logger.info("Key\tValue")
         self.logger.info("=====================================")
         for key, value in self.statistics.items():
@@ -289,7 +289,7 @@ class LMAP:
     def cleanup(self):
         """Clean up resources"""
         self.stop_local_scrape_loop()
-        self.dump_statistics("stats.csv")
+        self.dump_statistics(f"stats_{self.collector_id}.csv")
         if self.rdma:
             self.rdma.cleanup()
         self.logger.info(f"LMAP {self.collector_id} cleaned up")

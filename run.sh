@@ -26,8 +26,13 @@ IPU_RDMA_GID=${IPU_RDMA_GID:-1}
 WAIT_TIME=${WAIT_TIME:-5} # time to wait before starting apps
 MYUSER=${MYUSER:-$(whoami)}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-"uview"}  # Conda environment name
- # Experiment mode: either "prometheus", "read_loop" or "setup"
+ 
+# Experiment mode: either "prometheus", "read_loop" or "setup"
 EXPERIMENT_MODE=${EXPERIMENT_MODE:-"read_loop"}
+# This will be used to organize files (logs, results, etc. ) in the remote machine if non empty
+EXPERIMENT_LABEL=${EXPERIMENT_LABEL:-""}
+# Duration of the experiment in seconds (0 for infinite until user stops)
+EXPERIMENT_DURATION=${EXPERIMENT_DURATION:-0}
 
 # Create logs directory if it doesn't exist
 mkdir -p $LOGS_DIR
@@ -159,9 +164,28 @@ log "- Host agent: logs in ${LOGS_DIR}/host.log"
 log "- Clients: logs in ${LOGS_DIR}/client_*.log"
 log "- Collector: logs on remote machine at ./logs/microview_collector.log"
 log "- Prometheus metrics available at http://$REMOTE_HOST:$REMOTE_PORT"
-log "Press Ctrl+C to stop all processes"
 
 
-# Keep script running until user interrupts
-log "Monitoring system logs. Press Ctrl+C to stop."
-tail -f "${LOGS_DIR}/host.log" #"${LOGS_DIR}/client_"*.log
+# Keep script running until user interrupts, or until the specified duration is reached
+if [ $EXPERIMENT_DURATION -gt 0 ]; then
+  log "Running for $EXPERIMENT_DURATION seconds..."
+  tail -f "${LOGS_DIR}/host.log" & #"${LOGS_DIR}/client_"*.log
+  sleep $EXPERIMENT_DURATION
+else
+  log "Press Ctrl+C to stop"
+  tail -f "${LOGS_DIR}/host.log" #"${LOGS_DIR}/client_"*.log
+fi
+
+
+# Rename statistics files on remote machine if EXPERIMENT_LABEL is non empty
+if [ -n "$EXPERIMENT_LABEL" ]; then
+
+  log "Renaming statistics files for experiment: $EXPERIMENT_LABEL"
+
+  ssh $REMOTE_HOST "cd /$MYUSER/microview-cp/ \
+  && mkdir -p ./results/$EXPERIMENT_LABEL \
+  && mv ./stats_*.csv ./results/$EXPERIMENT_LABEL/ \
+  && mv ./logs/microview_collector.log ./results/$EXPERIMENT_LABEL/
+  && echo \"Statistics files moved to ./results/$EXPERIMENT_LABEL/\" \
+fi
+
